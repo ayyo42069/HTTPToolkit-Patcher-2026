@@ -43,3 +43,8 @@ node . restore
 ## License
 
 MIT
+
+## Disclaimer
+
+Please buy the original license after using the program.  
+https://httptoolkit.com/
