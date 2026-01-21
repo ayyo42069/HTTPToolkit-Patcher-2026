@@ -21,6 +21,10 @@ const argv = await yargs(process.argv.slice(2))
 const isWin = process.platform === 'win32'
 const isMac = process.platform === 'darwin'
 
+const userAgent = process.env.npm_config_user_agent
+const pm = userAgent ? userAgent.split('/')[0] : 'npm'
+const installCmd = pm === 'npm' ? 'install' : 'add'
+
 // Try to find where HTTP Toolkit is installed
 const appPath =
   isWin ? path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'HTTP Toolkit', 'resources')
@@ -180,7 +184,7 @@ const patchApp = async () => {
   console.log(chalk.yellowBright`Installing dependencies...`)
 
   try {
-    const proc = spawn('npm install express https-proxy-agent', { cwd: tempPath, stdio: 'inherit', shell: true })
+    const proc = spawn(`${pm} ${installCmd} express https-proxy-agent`, { cwd: tempPath, stdio: 'inherit', shell: true })
     activeProcesses.push(proc)
     await new Promise(resolve =>
       proc.on('close', resolve)
@@ -193,6 +197,9 @@ const patchApp = async () => {
   }
 
   rm(path.join(tempPath, 'package-lock.json'))
+  rm(path.join(tempPath, 'yarn.lock'))
+  rm(path.join(tempPath, 'pnpm-lock.yaml'))
+  rm(path.join(tempPath, 'bun.lockb'))
   fs.copyFileSync(filePath, `${filePath}.bak`)
   console.log(chalk.greenBright`Created backup at {bold ${filePath}.bak}`)
 
