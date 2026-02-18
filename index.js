@@ -131,6 +131,15 @@ const patchApp = async () => {
     process.exit(1)
   }
 
+  // Remove @prisma/instrumentation - it has a broken nested node_modules reference
+  // to @opentelemetry/instrumentation that causes a crash after repacking.
+  // It's only telemetry and not needed for the app to function.
+  const prismaInstrPath = path.join(tempPath, 'node_modules', '@prisma', 'instrumentation')
+  if (fs.existsSync(prismaInstrPath)) {
+    rm(prismaInstrPath)
+    console.log(chalk.yellowBright`Removed broken @prisma/instrumentation package`)
+  }
+
   const indexPath = path.join(tempPath, 'build', 'index.js')
   if (!fs.existsSync(indexPath)) {
     console.error(chalk.redBright`Couldn't find index.js file`)

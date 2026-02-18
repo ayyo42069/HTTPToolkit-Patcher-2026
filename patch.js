@@ -1,16 +1,24 @@
-// Patcher imports - need these for ESM compatibility
-import { createRequire as __patcherCreateRequire } from 'module';
-import { fileURLToPath as __patcherFileURLToPath } from 'url';
-import { dirname as __patcherDirname, join as __patcherJoin } from 'path';
+// Patcher imports - dynamic import works in both ESM and CJS
+const __patcherHttpsProxyAgent = (await import('https-proxy-agent')).HttpsProxyAgent;
+const __patcherExpress = (await import('express')).default;
+const __patcherHttps = (await import('https')).default;
+const __patcherFs = (await import('fs')).default;
+const __patcherOs = (await import('os')).default;
+const __patcherPath = (await import('path')).default;
 
-// Load modules using require (works better with the app's setup)
-const __patcherRequire = __patcherCreateRequire(import.meta.url);
-const __patcherHttpsProxyAgent = __patcherRequire('https-proxy-agent').HttpsProxyAgent;
-const __patcherExpress = __patcherRequire('express');
-const __patcherHttps = __patcherRequire('https');
-const __patcherFs = __patcherRequire('fs');
-const __patcherOs = __patcherRequire('os');
-const __patcherPath = __patcherRequire('path');
+// The fake pro user we inject everywhere
+const __patcherProUser = {
+  email,
+  subscription: {
+    status: 'active',
+    expiry: new Date('6767-06-07').toISOString(),
+    sku: 'pro-annual',
+  },
+  userId: 'patcher',
+  banned: false,
+  featureFlags: [],
+  teamSubscription: null,
+};
 
 // Simple HTTP request helper with redirect support
 const __patcherRequest = (method, url, redirectCount = 0) => new Promise((resolve, reject) => {
@@ -45,6 +53,17 @@ console.log(`[Patcher] Temp path: ${__patcherTempPath}`);
 
 const __patcherApp = __patcherExpress();
 __patcherApp.disable('x-powered-by');
+
+// LAYER 2: Intercept account API calls directly
+// Handles any endpoint the account store calls, so even if JS regex fails, app still gets pro user
+__patcherApp.all(/^\/__patcher_api\/(.*)/, (req, res) => {
+  console.log(`[Patcher] API intercept: ${req.url}`);
+  const user = JSON.parse(JSON.stringify(__patcherProUser));
+  user.subscription.expiry = new Date(user.subscription.expiry);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.json(user);
+});
 
 // Catch all requests and proxy them through our server
 __patcherApp.all(/(.*)/, async (req, res) => {
@@ -100,44 +119,39 @@ __patcherApp.all(/(.*)/, async (req, res) => {
 
     let data = remoteFile.data;
 
-    // This is where the magic happens - patch main.js to inject pro subscription
+    // LAYER 1: Patch main.js JS directly (with multiple fallback patterns)
     if (new URL(req.url, process.env.APP_URL).pathname === '/main.js') {
       console.log(`[Patcher] Patching main.js...`);
       res.setHeader('Cache-Control', 'no-store');
 
       data = data.toString();
 
-      // Find the account store class and module names (they're minified so we gotta search for them)
-      const accStoreName = data.match(/class ([0-9A-Za-z_]+){constructor\(e\){this\.goToSettings=e/)?.[1];
-      const modName = data.match(/([0-9A-Za-z_]+).(getLatestUserData|getLastUserData)/)?.[1];
+      // Try multiple regex patterns for different minification versions
+      const accStoreName =
+        data.match(/class ([0-9A-Za-z_$]+)\s*\{\s*constructor\s*\(\s*e\s*\)\s*\{\s*this\.goToSettings\s*=\s*e/)?.[1] ||
+        data.match(/class ([0-9A-Za-z_$]+)[^{]*\{[^}]{0,200}goToSettings/)?.[1];
 
-      if (!accStoreName) console.error(`[Patcher] Couldn't find account store class`);
-      else if (!modName) console.error(`[Patcher] Couldn't find user data module`);
-      else {
-        // Override the user data functions to return our fake pro user
+      const modName =
+        data.match(/([0-9A-Za-z_$]+)\.(getLatestUserData|getLastUserData)/)?.[1];
+
+      const userJson = JSON.stringify(__patcherProUser);
+      const userInit = `const __pUser=${userJson};__pUser.subscription.expiry=new Date(__pUser.subscription.expiry);`;
+
+      if (!accStoreName) {
+        console.error(`[Patcher] Couldn't find account store class - relying on API interception`);
+      } else if (!modName) {
+        console.error(`[Patcher] Couldn't find user data module - relying on API interception`);
+      } else {
+        const classPattern = new RegExp(`class ${accStoreName}\\s*\\{`);
         let patched = data.replace(
-          `class ${accStoreName}{`,
-          `["getLatestUserData","getLastUserData"].forEach(p=>Object.defineProperty(${modName},p,{value:()=>user}));class ${accStoreName}{`
+          classPattern,
+          `["getLatestUserData","getLastUserData"].forEach(p=>Object.defineProperty(${modName},p,{value:()=>__pUser}));class ${accStoreName}{`
         );
 
         if (patched === data) {
-          console.error(`[Patcher] Patch failed - couldn't find injection point`);
+          console.error(`[Patcher] JS inject failed - relying on API interception`);
         } else {
-          // Inject our pro user at the top
-          patched = `const user=${JSON.stringify({
-            email,
-            subscription: {
-              status: 'active',
-              expiry: new Date('6767-06-07').toISOString(),
-              sku: 'pro-annual',
-            },
-            userId: 'patcher',
-            banned: false,
-            featureFlags: [],
-            teamSubscription: null,
-          })};user.subscription.expiry=new Date(user.subscription.expiry);` + patched;
-
-          data = patched;
+          data = userInit + patched;
           console.log(`[Patcher] main.js patched successfully!`);
         }
       }
@@ -153,7 +167,7 @@ __patcherApp.all(/(.*)/, async (req, res) => {
 
 __patcherApp.listen(__patcherPort, () => console.log(`[Patcher] Running on port ${__patcherPort}`));
 
-// Fix CORS so the app can talk to our local server
+// Fix CORS and intercept account API at the Electron session level
 app.on('ready', () => {
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     // Block telemetry
@@ -168,6 +182,21 @@ app.on('ready', () => {
     details.requestHeaders.Origin = 'https://app.httptoolkit.tech';
     callback({ requestHeaders: details.requestHeaders });
   });
+
+  // LAYER 2: Redirect any account/auth API calls to our fake endpoint
+  session.defaultSession.webRequest.onBeforeRequest(
+    { urls: ['https://api.httptoolkit.tech/*', 'https://accounts.httptoolkit.tech/*'] },
+    (details, callback) => {
+      try {
+        const url = new URL(details.url);
+        const redirectURL = `http://localhost:${__patcherPort}/__patcher_api${url.pathname}${url.search}`;
+        console.log(`[Patcher] Redirecting API: ${details.url} -> ${redirectURL}`);
+        callback({ redirectURL });
+      } catch (e) {
+        callback({});
+      }
+    }
+  );
 
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     if (details.responseHeaders) {
