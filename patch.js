@@ -76,9 +76,10 @@ __patcherApp.all(/(.*)/, async (req, res) => {
     filePath += '.html';
   }
 
-  // Block service worker - it causes caching headaches
+  // Block service worker - it causes caching headaches but needs to return 200 dummy script to prevent startup error
   if (new URL(req.url, process.env.APP_URL).pathname === '/ui-update-worker.js') {
-    return res.status(404).send('Not found');
+    res.set('Content-Type', 'application/javascript');
+    return res.status(200).send('self.addEventListener("install", () => self.skipWaiting()); self.addEventListener("activate", () => self.clients.claim());');
   }
 
   if (!__patcherFs.existsSync(__patcherTempPath)) {
