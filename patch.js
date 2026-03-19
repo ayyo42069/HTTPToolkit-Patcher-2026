@@ -120,14 +120,32 @@ __patcherApp.all(/(.*)/, async (req, res) => {
 
     let data = remoteFile.data;
 
-    // LAYER 1: Patch main.js JS directly (with multiple fallback patterns)
+    // LAYER 1: Patch main.js JS directly
     if (new URL(req.url, process.env.APP_URL).pathname === '/main.js') {
       console.log(`[Patcher] Patching main.js...`);
       res.setHeader('Cache-Control', 'no-store');
 
       data = data.toString();
 
-      // Try multiple regex patterns for different minification versions
+      // LAYER 1a: Brute-force replace all paid-user checks with stubs on Object.prototype
+      // This guarantees isPaidUser() etc. always return true even on plain JSON objects
+      const stubMethods = [
+        'Object.defineProperty(Object.prototype,"__p_isPaid",{value:function(){return true},configurable:true,writable:true,enumerable:false});',
+        'Object.defineProperty(Object.prototype,"__p_hasSub",{value:function(){return true},configurable:true,writable:true,enumerable:false});',
+        'Object.defineProperty(Object.prototype,"__p_isPastDue",{value:function(){return false},configurable:true,writable:true,enumerable:false});',
+      ].join('');
+
+      let beforeCount = data.length;
+      data = data.replaceAll('.isPaidUser()', '.__p_isPaid()');
+      data = data.replaceAll('.userHasSubscription()', '.__p_hasSub()');
+      data = data.replaceAll('.isPastDueUser()', '.__p_isPastDue()');
+
+      if (data.length !== beforeCount) {
+        data = stubMethods + data;
+        console.log(`[Patcher] Brute-force method stubs injected`);
+      }
+
+      // LAYER 1b: Also try regex-based user data override for deeper integration
       const accStoreName =
         data.match(/class ([0-9A-Za-z_$]+)\s*\{\s*constructor\s*\(\s*e\s*\)\s*\{\s*this\.goToSettings\s*=\s*e/)?.[1] ||
         data.match(/class ([0-9A-Za-z_$]+)[^{]*\{[^}]{0,200}goToSettings/)?.[1];
@@ -136,12 +154,12 @@ __patcherApp.all(/(.*)/, async (req, res) => {
         data.match(/([0-9A-Za-z_$]+)\.(getLatestUserData|getLastUserData)/)?.[1];
 
       const userJson = JSON.stringify(__patcherProUser);
-      const userInit = `const __pUser=${userJson};__pUser.subscription.expiry=new Date(__pUser.subscription.expiry);`;
+      const userInit = `const __pUser=${userJson};__pUser.subscription.expiry=new Date(__pUser.subscription.expiry);__pUser.__p_isPaid=()=>true;__pUser.__p_hasSub=()=>true;__pUser.__p_isPastDue=()=>false;`;
 
       if (!accStoreName) {
-        console.error(`[Patcher] Couldn't find account store class - relying on API interception`);
+        console.error(`[Patcher] Couldn't find account store class - relying on API interception + brute-force stubs`);
       } else if (!modName) {
-        console.error(`[Patcher] Couldn't find user data module - relying on API interception`);
+        console.error(`[Patcher] Couldn't find user data module - relying on API interception + brute-force stubs`);
       } else {
         const classPattern = new RegExp(`class ${accStoreName}\\s*\\{`);
         let patched = data.replace(
@@ -150,10 +168,10 @@ __patcherApp.all(/(.*)/, async (req, res) => {
         );
 
         if (patched === data) {
-          console.error(`[Patcher] JS inject failed - relying on API interception`);
+          console.error(`[Patcher] JS inject failed - relying on API interception + brute-force stubs`);
         } else {
           data = userInit + patched;
-          console.log(`[Patcher] main.js patched successfully!`);
+          console.log(`[Patcher] main.js patched successfully (regex + brute-force)!`);
         }
       }
     }

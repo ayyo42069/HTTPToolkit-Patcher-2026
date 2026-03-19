@@ -131,13 +131,37 @@ const patchApp = async () => {
     process.exit(1)
   }
 
-  // Remove @prisma/instrumentation - it has a broken nested node_modules reference
-  // to @opentelemetry/instrumentation that causes a crash after repacking.
-  // It's only telemetry and not needed for the app to function.
+  // Replace @prisma/instrumentation with a stub - it has a broken nested node_modules
+  // reference to @opentelemetry/instrumentation that causes a crash after repacking.
+  // @sentry/node's prisma integration imports from it, so we can't just delete it —
+  // we need a stub that exports the expected symbols as noops.
   const prismaInstrPath = path.join(tempPath, 'node_modules', '@prisma', 'instrumentation')
   if (fs.existsSync(prismaInstrPath)) {
     rm(prismaInstrPath)
-    console.log(chalk.yellowBright`Removed broken @prisma/instrumentation package`)
+    fs.mkdirSync(prismaInstrPath, { recursive: true })
+    fs.writeFileSync(path.join(prismaInstrPath, 'package.json'), JSON.stringify({
+      name: '@prisma/instrumentation',
+      version: '0.0.0-stub',
+      main: 'index.js',
+      type: 'module'
+    }, null, 2))
+    fs.writeFileSync(path.join(prismaInstrPath, 'index.js'),
+      [
+        'export class PrismaInstrumentation {',
+        '  constructor(config) { this._config = config; }',
+        '  instrumentationName = "@prisma/instrumentation";',
+        '  instrumentationVersion = "0.0.0";',
+        '  enable() {}',
+        '  disable() {}',
+        '  setTracerProvider() {}',
+        '  setMeterProvider() {}',
+        '  getConfig() { return this._config || {}; }',
+        '}',
+        'export default PrismaInstrumentation;',
+        ''
+      ].join('\n')
+    )
+    console.log(chalk.yellowBright`Replaced broken @prisma/instrumentation with stub`)
   }
 
   const indexPath = path.join(tempPath, 'build', 'index.js')
