@@ -1,5 +1,5 @@
 // @ts-check
-import { spawn } from 'child_process'
+import { spawn, execFileSync } from 'child_process'
 import { flipFuses, FuseVersion, FuseV1Options } from '@electron/fuses'
 import asar from '@electron/asar'
 import prompts from 'prompts'
@@ -263,6 +263,21 @@ const flipElectronFuses = async () => {
   } catch (e) {
     console.error(chalk.yellowBright`Failed to flip fuses (might already be done or not supported): ${/** @type {Error} */ (e).message}`)
   }
+
+  // On macOS, flipping fuses invalidates the code signature, causing a SIGKILL
+  // (CODESIGNING, Code 2: Invalid Page) before Electron even boots.
+  // Re-sign the entire app bundle ad-hoc so macOS accepts it again.
+  if (isMac) {
+    const appBundle = '/Applications/HTTP Toolkit.app'
+    console.log(chalk.yellowBright`Re-signing app bundle (required after binary modification on macOS)...`)
+    try {
+      execFileSync('codesign', ['--force', '--deep', '--sign', '-', appBundle], { stdio: 'inherit' })
+      console.log(chalk.greenBright`App re-signed successfully`)
+    } catch (e) {
+      console.error(chalk.redBright`codesign failed: ${/** @type {Error} */ (e).message}`)
+      console.error(chalk.yellowBright`You may need to run: codesign --force --deep --sign - "${appBundle}"`)
+    }
+  }
 }
 
 switch (argv._[0]) {
@@ -279,6 +294,22 @@ switch (argv._[0]) {
         console.log(chalk.greenBright`App restored successfully`)
       }
       rm(path.join(os.tmpdir(), 'httptoolkit-patch'))
+
+      // The fuse flip modifies the binary itself (not the ASAR), so restoring the
+      // ASAR backup alone isn't enough — the executable still has an invalid code
+      // signature. Re-sign ad-hoc so macOS accepts it and the app can run / be
+      // re-patched without crashing immediately.
+      if (isMac) {
+        const appBundle = '/Applications/HTTP Toolkit.app'
+        console.log(chalk.yellowBright`Re-signing app bundle to fix invalidated code signature...`)
+        try {
+          execFileSync('codesign', ['--force', '--deep', '--sign', '-', appBundle], { stdio: 'inherit' })
+          console.log(chalk.greenBright`App re-signed successfully`)
+        } catch (e) {
+          console.error(chalk.redBright`codesign failed: ${/** @type {Error} */ (e).message}`)
+          console.error(chalk.yellowBright`Run manually: codesign --force --deep --sign - "${appBundle}"`)
+        }
+      }
     } catch (e) {
       if (!isSudo && /** @type {any} */ (e).errno === -13) { // Permission denied
         console.error(chalk.redBright`Permission denied${!isWin ? ', try running with sudo' : ', try running node as administrator'}`)
