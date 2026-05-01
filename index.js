@@ -27,13 +27,13 @@ const installCmd = pm === 'npm' ? 'install' : 'add'
 
 // Try to find where HTTP Toolkit is installed
 const appPath =
-  isWin ? path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'HTTP Toolkit', 'resources')
+  isWin ? path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'httptoolkit', 'resources')
     : isMac ? '/Applications/HTTP Toolkit.app/Contents/Resources'
       : fs.existsSync('/opt/HTTP Toolkit/resources') ? '/opt/HTTP Toolkit/resources'
         : '/opt/httptoolkit/resources'
 
 const exePath =
-  isWin ? path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'HTTP Toolkit', 'HTTP Toolkit.exe')
+  isWin ? path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'httptoolkit', 'HTTP Toolkit.exe')
     : isMac ? '/Applications/HTTP Toolkit.app/Contents/MacOS/HTTP Toolkit'
       : fs.existsSync('/opt/HTTP Toolkit/httptoolkit') ? '/opt/HTTP Toolkit/httptoolkit'
         : '/opt/httptoolkit/httptoolkit'
