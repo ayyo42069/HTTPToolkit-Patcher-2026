@@ -24,6 +24,9 @@ node . start
 
 # Restore original (if needed)
 node . restore
+
+# Specify a custom install path (e.g. Program Files)
+node . patch --path "C:\Program Files\HTTP Toolkit"
 ```
 
 ## How it works
@@ -38,6 +41,7 @@ node . restore
 
 - Creates a backup at `app.asar.bak` before patching
 - You can set a custom proxy with the `PROXY` environment variable
+- Use `--path` to point at a non-default install location; auto-detection also covers `Program Files` and the newer `Programs\httptoolkit\HTTP Toolkit` layout on Windows
 - Works offline after first run (caches UI files locally)
 
 ## License

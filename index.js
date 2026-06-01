@@ -14,6 +14,10 @@ const argv = await yargs(process.argv.slice(2))
   .command('patch', 'Patch HTTP Toolkit using the specified script')
   .command('restore', 'Restore HTTP Toolkit files to their original state')
   .command('start', 'Start HTTP Toolkit')
+  .option('path', {
+    type: 'string',
+    describe: 'Path to the HTTP Toolkit installation (the install dir or its resources folder)'
+  })
   .demandCommand(1, 'You need at least one command before moving on')
   .alias('h', 'help')
   .parse()
@@ -26,17 +30,37 @@ const pm = userAgent ? userAgent.split('/')[0] : 'npm'
 const installCmd = pm === 'npm' ? 'install' : 'add'
 
 // Try to find where HTTP Toolkit is installed
-const appPath =
-  isWin ? path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'httptoolkit', 'resources')
-    : isMac ? '/Applications/HTTP Toolkit.app/Contents/Resources'
-      : fs.existsSync('/opt/HTTP Toolkit/resources') ? '/opt/HTTP Toolkit/resources'
-        : '/opt/httptoolkit/resources'
+const getAppPath = () => {
+  if (argv.path) {
+    return /resources$/i.test(argv.path) ? argv.path : path.join(argv.path, isMac ? 'Contents/Resources' : 'resources')
+  }
+  const localAppData = process.env.LOCALAPPDATA ?? ''
+  const candidates = isWin
+    ? [
+      path.join(localAppData, 'Programs', 'httptoolkit', 'HTTP Toolkit', 'resources'), // current default
+      path.join(localAppData, 'Programs', 'httptoolkit', 'resources'), // older default
+      path.join(process.env.PROGRAMFILES ?? '', 'HTTP Toolkit', 'resources'),
+      path.join(process.env['PROGRAMFILES(X86)'] ?? '', 'HTTP Toolkit', 'resources')
+    ]
+    : isMac
+      ? ['/Applications/HTTP Toolkit.app/Contents/Resources']
+      : [
+        '/opt/HTTP Toolkit/resources',
+        '/opt/httptoolkit/resources',
+        '/usr/lib/httptoolkit'
+      ]
+  for (const p of candidates) {
+    if (p && fs.existsSync(path.join(p, 'app.asar'))) return p
+  }
+  return candidates[0]
+}
+
+const appPath = getAppPath()
 
 const exePath =
-  isWin ? path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'httptoolkit', 'HTTP Toolkit.exe')
-    : isMac ? '/Applications/HTTP Toolkit.app/Contents/MacOS/HTTP Toolkit'
-      : fs.existsSync('/opt/HTTP Toolkit/httptoolkit') ? '/opt/HTTP Toolkit/httptoolkit'
-        : '/opt/httptoolkit/httptoolkit'
+  isWin ? path.join(path.dirname(appPath), 'HTTP Toolkit.exe')
+    : isMac ? path.join(path.dirname(appPath), 'MacOS', 'HTTP Toolkit')
+      : path.join(path.dirname(appPath), 'httptoolkit')
 
 const isSudo = !isWin && (process.getuid || (() => process.env.SUDO_UID ? 0 : null))() === 0
 
