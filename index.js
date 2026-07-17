@@ -47,7 +47,8 @@ const getAppPath = () => {
       : [
         '/opt/HTTP Toolkit/resources',
         '/opt/httptoolkit/resources',
-        '/usr/lib/httptoolkit'
+        '/usr/lib/httptoolkit',
+        '/usr/share/httptoolkit/resources'
       ]
   for (const p of candidates) {
     if (p && fs.existsSync(path.join(p, 'app.asar'))) return p
@@ -97,7 +98,7 @@ const cleanUp = async () => {
     console.log(chalk.yellowBright`Stopping active processes...`)
     for (const proc of activeProcesses) {
       proc.kill('SIGINT')
-      console.log(chalk.yellowBright`Process {bold ${proc.pid ? process.pid + ' ' : ''}}stopped`)
+      console.log(chalk.yellowBright`Process {bold ${proc.pid ? proc.pid + ' ' : ''}}stopped`)
     }
     await new Promise(resolve => setTimeout(resolve, 1000))
   }
