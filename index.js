@@ -66,6 +66,11 @@ const exePath =
 
 const isSudo = !isWin && (process.getuid || (() => process.env.SUDO_UID ? 0 : null))() === 0
 
+// The bundled node server that backs MCP / remote control. It lives next to the
+// asar (not inside it), so we patch it directly on disk.
+const serverBundlePath = path.join(appPath, 'httptoolkit-server', 'bundle', 'index.js')
+const patcherPort = process.env.PATCHER_PORT || 5067
+
 if (+(process.versions.node.split('.')[0]) < 15) {
   console.error(chalk.redBright`Node.js version 15 or higher is recommended, you are using version {bold ${process.versions.node}}`)
 }
@@ -267,8 +272,92 @@ const patchApp = async () => {
   rm(tempPath)
   console.log(chalk.greenBright`App patched!`)
 
+  // Patch the node server so the MCP / remote-control bridge works with our UI
+  patchServerBundle()
+
+  // Drop any cached UI so main.js is re-fetched and re-patched (picks up the
+  // MCP userJwt fix in patch.js on next launch).
+  rm(path.join(os.tmpdir(), 'httptoolkit-patch'))
+
   // Disable ASAR integrity checks so Electron doesn't complain
   await flipElectronFuses()
+}
+
+// Patch the bundled node server so the MCP / remote-control bridge accepts our
+// patched UI. Three edits, all in httptoolkit-server/bundle/index.js:
+//   1. Add our proxy origin to the server's ALLOWED_ORIGINS allow-list, so the
+//      UI's /ui-operations WebSocket (served from localhost) isn't rejected. NOTE:
+//      this widens a deliberate security control (it normally only trusts
+//      app.httptoolkit.tech, to stop other local apps/sites driving your proxy).
+//   2. Make the bridge's WebSocket auth succeed for any JWT — we hand the UI a
+//      dummy token (see patch.js) since the faked Pro user has no real account JWT.
+//   3. Force the bridge's isPaidUser() true so Pro-only MCP operations are allowed.
+// These strings are minified and version-specific: if HTTP Toolkit updates and a
+// pattern no longer matches, we warn and skip rather than fail the whole patch —
+// the Pro unlock still works, only MCP remote control is affected.
+const patchServerBundle = () => {
+  if (!fs.existsSync(serverBundlePath)) {
+    console.log(chalk.yellowBright`Server bundle not found at ${serverBundlePath}, skipping MCP bridge patch`)
+    return
+  }
+
+  const edits = [
+    {
+      name: 'allow proxy origin',
+      from: 'ei?[/^https:\\/\\/app\\.httptoolkit\\.tech$/]:',
+      to: `ei?[/^https:\\/\\/app\\.httptoolkit\\.tech$/,/^http:\\/\\/localhost:${patcherPort}$/]:`
+    },
+    {
+      name: 'accept bridge auth',
+      from: 'if(!1===A.jwt){e.user=void 0,r&&this.completeInitialAuth(e)',
+      to: 'if(!0){e.user=void 0,r&&this.completeInitialAuth(e)'
+    },
+    {
+      name: 'force bridge isPaidUser',
+      from: 'key:"isPaidUser",value:function(){',
+      to: 'key:"isPaidUser",value:function(){return!0;'
+    }
+  ]
+
+  let data = fs.readFileSync(serverBundlePath, 'utf-8')
+
+  if (edits.every(e => data.includes(e.to))) {
+    console.log(chalk.greenBright`Server bundle already patched for MCP`)
+    return
+  }
+
+  // Keep an original copy so `restore` can put it back.
+  const bundleBak = `${serverBundlePath}.bak`
+  if (!fs.existsSync(bundleBak)) fs.copyFileSync(serverBundlePath, bundleBak)
+
+  let applied = 0
+  for (const edit of edits) {
+    if (data.includes(edit.to)) { applied++; continue }
+    const count = data.split(edit.from).length - 1
+    if (count !== 1) {
+      console.error(chalk.yellowBright`Couldn't apply MCP patch '${edit.name}' (pattern changed?) - skipping`)
+      continue
+    }
+    data = data.replace(edit.from, edit.to)
+    applied++
+  }
+
+  if (applied === 0) {
+    console.error(chalk.yellowBright`No MCP bridge patches applied - remote control may be unavailable`)
+    return
+  }
+
+  fs.writeFileSync(serverBundlePath, data, 'utf-8')
+  console.log(chalk.greenBright`Patched server bundle for MCP (${applied}/${edits.length} edits)`)
+}
+
+const restoreServerBundle = () => {
+  const bundleBak = `${serverBundlePath}.bak`
+  if (fs.existsSync(bundleBak)) {
+    fs.copyFileSync(bundleBak, serverBundlePath)
+    fs.rmSync(bundleBak, { force: true })
+    console.log(chalk.greenBright`Restored original server bundle`)
+  }
 }
 
 const flipElectronFuses = async () => {
@@ -304,6 +393,7 @@ switch (argv._[0]) {
         fs.copyFileSync(path.join(appPath, 'app.asar.bak'), path.join(appPath, 'app.asar'))
         console.log(chalk.greenBright`App restored successfully`)
       }
+      restoreServerBundle()
       rm(path.join(os.tmpdir(), 'httptoolkit-patch'))
     } catch (e) {
       if (!isSudo && /** @type {any} */ (e).errno === -13) { // Permission denied

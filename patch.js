@@ -145,6 +145,17 @@ __patcherApp.all(/(.*)/, async (req, res) => {
         console.log(`[Patcher] Brute-force method stubs injected`);
       }
 
+      // LAYER 1c: Keep the MCP / remote-control bridge working. Because we fake a
+      // logged-in Pro user without a real account JWT, the UI's `userJwt` getter
+      // throws "No JWT found for logged in user", which crashes the operations
+      // client before it can register with the server bridge. Hand it a dummy
+      // token instead — the server side (patched in index.js) accepts any JWT.
+      const jwtThrow = 'throw new Error("No JWT found for logged in user")';
+      if (data.includes(jwtThrow)) {
+        data = data.replace(jwtThrow, 'return"htk-patched-jwt"');
+        console.log(`[Patcher] Neutralised userJwt throw for MCP bridge`);
+      }
+
       // LAYER 1b: Also try regex-based user data override for deeper integration
       const accStoreName =
         data.match(/class ([0-9A-Za-z_$]+)\s*\{\s*constructor\s*\(\s*e\s*\)\s*\{\s*this\.goToSettings\s*=\s*e/)?.[1] ||
@@ -188,6 +199,13 @@ __patcherApp.listen(__patcherPort, () => console.log(`[Patcher] Running on port 
 
 // Fix CORS and intercept account API at the Electron session level
 app.on('ready', () => {
+  // Remember each request's real browser Origin so we can reflect it back in the
+  // CORS response. Reflecting (instead of hard-coding an origin) is what lets the
+  // account/pricing fetches survive being redirected to our local __patcher_api:
+  // a cross-origin redirect taints the origin, so the response must echo whatever
+  // the browser actually sent, with credentials allowed.
+  const __patcherOriginByReq = new Map();
+
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     // Block telemetry
     const blocked = ['events.httptoolkit.tech'];
@@ -198,7 +216,21 @@ app.on('ready', () => {
       }
     } catch (e) { }
 
-    details.requestHeaders.Origin = 'https://app.httptoolkit.tech';
+    const origin = details.requestHeaders.Origin ?? details.requestHeaders.origin
+    if (origin) __patcherOriginByReq.set(details.id, origin)
+
+    // The local HTTP Toolkit server (127.0.0.1) gates every endpoint — the REST/
+    // GraphQL API AND the MCP/remote-control /ui-operations WebSocket — on the
+    // request Origin being exactly https://app.httptoolkit.tech (prod builds).
+    // Our UI runs on localhost, so spoof the Origin for requests to that server
+    // only. We must NOT spoof it for requests to our own proxy (localhost:${port}),
+    // because that breaks the browser CORS check on the redirected account API.
+    let host = ''
+    try { host = new URL(details.url).hostname } catch (e) { }
+    if (host === '127.0.0.1') {
+      details.requestHeaders.Origin = 'https://app.httptoolkit.tech'
+    }
+
     callback({ requestHeaders: details.requestHeaders });
   });
 
@@ -218,10 +250,16 @@ app.on('ready', () => {
   );
 
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    if (details.responseHeaders) {
-      details.responseHeaders['Access-Control-Allow-Origin'] = [`http://localhost:${__patcherPort}`];
-      delete details.responseHeaders['access-control-allow-origin'];
+    const headers = details.responseHeaders ?? {};
+    // Drop any existing CORS headers (from the real server or our own express app)
+    // so we don't end up with duplicate/conflicting values.
+    for (const key of Object.keys(headers)) {
+      if (/^access-control-allow-(origin|credentials)$/i.test(key)) delete headers[key];
     }
-    callback({ responseHeaders: details.responseHeaders });
+    const origin = __patcherOriginByReq.get(details.id) ?? `http://localhost:${__patcherPort}`;
+    __patcherOriginByReq.delete(details.id);
+    headers['Access-Control-Allow-Origin'] = [origin];
+    headers['Access-Control-Allow-Credentials'] = ['true'];
+    callback({ responseHeaders: headers });
   });
 });
