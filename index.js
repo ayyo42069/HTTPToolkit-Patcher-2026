@@ -37,7 +37,8 @@ const getAppPath = () => {
   const localAppData = process.env.LOCALAPPDATA ?? ''
   const candidates = isWin
     ? [
-      path.join(localAppData, 'Programs', 'httptoolkit', 'HTTP Toolkit', 'resources'), // current default
+      path.join(localAppData, 'Programs', 'HTTP Toolkit', 'resources'), // current default
+      path.join(localAppData, 'Programs', 'httptoolkit', 'HTTP Toolkit', 'resources'),
       path.join(localAppData, 'Programs', 'httptoolkit', 'resources'), // older default
       path.join(process.env.PROGRAMFILES ?? '', 'HTTP Toolkit', 'resources'),
       path.join(process.env['PROGRAMFILES(X86)'] ?? '', 'HTTP Toolkit', 'resources')
