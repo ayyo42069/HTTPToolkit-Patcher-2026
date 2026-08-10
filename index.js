@@ -218,24 +218,24 @@ const patchApp = async () => {
   ;['SIGINT', 'SIGTERM'].forEach(signal => process.on(signal, cleanUp))
   const patchContent = fs.readFileSync('patch.js', 'utf-8')
 
-  // Separate imports from the rest of the patch code
-  const patchImportsMatch = patchContent.match(/\/\/ --- Patcher Imports[\s\S]*?\/\/ --- End Patcher Imports ---\n?/)
-  const patchImports = patchImportsMatch ? patchImportsMatch[0] : ''
-  const patchCode = patchContent.replace(patchImports, '')
+  // Some builds ship a CommonJS entry point, where the patch's top-level
+  // `await import()` is a syntax error and the app won't even start
+  const isEsmApp = (() => {
+    try {
+      const { type } = JSON.parse(fs.readFileSync(path.join(tempPath, 'package.json'), 'utf-8'))
+      if (type) return type === 'module'
+    } catch (e) { /* no readable package.json, fall back to sniffing the entry point */ }
+    return /^\s*import .+ from ['"]/m.test(data)
+  })()
 
-  // Find where to put our imports (right after the last existing import)
-  const lastImportMatch = data.match(/^import .+$/gm)
-  const lastImport = lastImportMatch ? lastImportMatch[lastImportMatch.length - 1] : null
+  console.log(chalk.yellowBright`Entry point looks like {bold ${isEsmApp ? 'ESM' : 'CommonJS'}}`)
 
-  let patchedData = data
-
-  // Inject imports at the top
-  if (patchImports && lastImport) {
-    patchedData = patchedData.replace(lastImport, `${lastImport}\n// ------- Patcher Imports -------\n${patchImports.trim()}\n// ------- End Patcher Imports -------`)
-  }
+  const patchCode = isEsmApp ? patchContent : patchContent
+    .replace(/\(await import\((['"][^'"]+['"])\)\)\.default/g, 'require($1)')
+    .replace(/\(await import\((['"][^'"]+['"])\)\)/g, 'require($1)')
 
   // Inject the main patch code where APP_URL is defined
-  patchedData = patchedData
+  const patchedData = data
     .replace('const APP_URL =', `// ------- Injected by HTTP Toolkit Patcher -------\nconst email = \`${email.replace(/`/g, '\\`')}\`\nconst globalProxy = process.env.PROXY ?? \`${globalProxy ? globalProxy.replace(/`/g, '\\`') : ''}\`\n${patchCode}\n// ------- End patched content -------\nconst APP_URL =`)
 
   if (data === patchedData || !patchedData) {
