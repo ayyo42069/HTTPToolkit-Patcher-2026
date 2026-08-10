@@ -1,10 +1,13 @@
-// Patcher imports - dynamic import works in both ESM and CJS
+// --- Patcher Imports ---
+// Written for ESM. Top-level `await` is a *syntax* error in CommonJS, so when the
+// app's entry point is CJS index.js rewrites these into require() calls.
 const __patcherHttpsProxyAgent = (await import('https-proxy-agent')).HttpsProxyAgent;
 const __patcherExpress = (await import('express')).default;
 const __patcherHttps = (await import('https')).default;
 const __patcherFs = (await import('fs')).default;
 const __patcherOs = (await import('os')).default;
 const __patcherPath = (await import('path')).default;
+// --- End Patcher Imports ---
 
 // The fake pro user we inject everywhere
 const __patcherProUser = {
