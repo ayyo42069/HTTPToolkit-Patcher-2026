@@ -87,16 +87,8 @@ if (!fs.existsSync(path.join(appPath, 'app.asar'))) {
 
 console.log(chalk.blueBright`Found HTTP Toolkit at {bold ${path.dirname(appPath)}}`)
 
-// Helper to recursively delete directories
-const rm = dirPath => {
-  if (!fs.existsSync(dirPath)) return
-  if (!fs.lstatSync(dirPath).isDirectory()) return fs.rmSync(dirPath, { force: true })
-  for (const entry of fs.readdirSync(dirPath)) {
-    const entryPath = path.join(dirPath, entry)
-    if (fs.lstatSync(entryPath).isDirectory()) rm(entryPath)
-    else fs.rmSync(entryPath, { force: true })
-  }
-}
+// Delete a file or directory tree, ignoring paths that don't exist
+const rm = dirPath => fs.rmSync(dirPath, { recursive: true, force: true })
 
 /** @type {Array<import('child_process').ChildProcess>} */
 const activeProcesses = []
