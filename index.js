@@ -25,9 +25,14 @@ const argv = await yargs(process.argv.slice(2))
 const isWin = process.platform === 'win32'
 const isMac = process.platform === 'darwin'
 
-const userAgent = process.env.npm_config_user_agent
-const pm = userAgent ? userAgent.split('/')[0] : 'npm'
-const installCmd = pm === 'npm' ? 'install' : 'add'
+// Run npm through the same node binary that's running us. `sudo` resets PATH, so
+// with a user-local node (nvm etc.) the patcher starts fine but `npm` isn't found.
+// Always npm: the app's node_modules is an npm-style tree that gets packed into the asar.
+const npmCli = [
+  process.env.npm_execpath,
+  path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'), // Windows
+  path.join(path.dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js') // macOS / Linux
+].find(p => p && p.endsWith('npm-cli.js') && fs.existsSync(p))
 
 // Try to find where HTTP Toolkit is installed
 const getAppPath = () => {
@@ -82,16 +87,8 @@ if (!fs.existsSync(path.join(appPath, 'app.asar'))) {
 
 console.log(chalk.blueBright`Found HTTP Toolkit at {bold ${path.dirname(appPath)}}`)
 
-// Helper to recursively delete directories
-const rm = dirPath => {
-  if (!fs.existsSync(dirPath)) return
-  if (!fs.lstatSync(dirPath).isDirectory()) return fs.rmSync(dirPath, { force: true })
-  for (const entry of fs.readdirSync(dirPath)) {
-    const entryPath = path.join(dirPath, entry)
-    if (fs.lstatSync(entryPath).isDirectory()) rm(entryPath)
-    else fs.rmSync(entryPath, { force: true })
-  }
-}
+// Delete a file or directory tree, ignoring paths that don't exist
+const rm = dirPath => fs.rmSync(dirPath, { recursive: true, force: true })
 
 /** @type {Array<import('child_process').ChildProcess>} */
 const activeProcesses = []
@@ -247,14 +244,27 @@ const patchApp = async () => {
   console.log(chalk.greenBright`Patched index.js successfully`)
   console.log(chalk.yellowBright`Installing dependencies...`)
 
+  const deps = ['express', 'https-proxy-agent']
   try {
-    const proc = spawn(`${pm} ${installCmd} express https-proxy-agent`, { cwd: tempPath, stdio: 'inherit', shell: true })
+    const proc = npmCli
+      ? spawn(process.execPath, [npmCli, 'install', ...deps], { cwd: tempPath, stdio: 'inherit' })
+      : spawn(`npm install ${deps.join(' ')}`, { cwd: tempPath, stdio: 'inherit', shell: true })
     activeProcesses.push(proc)
-    await new Promise(resolve =>
+    const code = await new Promise(resolve => {
+      proc.on('error', () => resolve(null))
       proc.on('close', resolve)
-    )
+    })
     activeProcesses.splice(activeProcesses.indexOf(proc), 1)
     if (isCancelled) return
+
+    // Repacking without these ships an app that dies on launch with
+    // ERR_MODULE_NOT_FOUND, so stop here while app.asar is still untouched
+    const missing = deps.filter(d => !fs.existsSync(path.join(tempPath, 'node_modules', d, 'package.json')))
+    if (code !== 0 || missing.length) {
+      console.error(chalk.redBright`Installing dependencies failed (npm exited with ${code}${missing.length ? `, missing ${missing.join(', ')}` : ''}) - HTTP Toolkit was not modified`)
+      if (!npmCli) console.error(chalk.redBright`Couldn't locate npm next to node - if you're using sudo, try {bold sudo env "PATH=$PATH" node . patch}`)
+      return cleanUp()
+    }
   } catch (e) {
     console.error(chalk.redBright`Error installing dependencies`, e)
     cleanUp()
