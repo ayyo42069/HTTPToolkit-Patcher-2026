@@ -1,4 +1,6 @@
 // @ts-check
+import { closeToolkitBeforePatch } from './shutdown.js'
+import { removePreviousPatch } from './patch-utils.js'
 import { spawn } from 'child_process'
 import { flipFuses, FuseVersion, FuseV1Options } from '@electron/fuses'
 import asar from '@electron/asar'
@@ -123,13 +125,21 @@ const cleanUp = async () => {
 }
 
 const patchApp = async () => {
+  const { closeConfirmed } = await prompts({
+    type: 'confirm',
+    name: 'closeConfirmed',
+    message: 'Close all running HTTP Toolkit instances and servers before patching?',
+    initial: false
+  })
+  if (closeConfirmed !== true) {
+    console.log(chalk.yellowBright`Patch cancelled. No processes were closed or files changed.`)
+    return
+  }
+  await closeToolkitBeforePatch(path.dirname(appPath))
   const filePath = path.join(appPath, 'app.asar')
   const tempPath = path.join(appPath, 'app')
 
-  if (fs.readFileSync(filePath).includes('Injected by HTTP Toolkit Patcher')) {
-    console.log(chalk.greenBright`App is already patched!`)
-    return
-  }
+  // Replace existing injected code when reapplying an updated patcher.
 
   const globalProxy = process.env.PROXY
 
@@ -197,7 +207,7 @@ const patchApp = async () => {
     console.error(chalk.redBright`Couldn't find index.js file`)
     cleanUp()
   }
-  const data = fs.readFileSync(indexPath, 'utf-8')
+  const data = removePreviousPatch(fs.readFileSync(indexPath, 'utf-8'))
     ;['SIGINT', 'SIGTERM'].forEach(signal => process.off(signal, cleanUp))
 
   const { email } = await prompts({
@@ -213,7 +223,7 @@ const patchApp = async () => {
   }
 
   ;['SIGINT', 'SIGTERM'].forEach(signal => process.on(signal, cleanUp))
-  const patchContent = fs.readFileSync('patch.js', 'utf-8')
+  const patchContent = fs.readFileSync(new URL('./patch.js', import.meta.url), 'utf-8')
 
   // Some builds ship a CommonJS entry point, where the patch's top-level
   // `await import()` is a syntax error and the app won't even start
@@ -314,8 +324,8 @@ const patchServerBundle = () => {
   const edits = [
     {
       name: 'allow proxy origin',
-      from: 'ei?[/^https:\\/\\/app\\.httptoolkit\\.tech$/]:',
-      to: `ei?[/^https:\\/\\/app\\.httptoolkit\\.tech$/,/^http:\\/\\/localhost:${patcherPort}$/]:`
+      from: '?[/^https:\\/\\/app\\.httptoolkit\\.tech$/]:',
+      to: `?[/^https:\\/\\/app\\.httptoolkit\\.tech$/,/^http:\\/\\/localhost:${patcherPort}$/]:`
     },
     {
       name: 'accept bridge auth',

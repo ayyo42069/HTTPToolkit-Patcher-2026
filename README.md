@@ -73,3 +73,30 @@ MIT
 
 Please buy the original license after using the program.  
 https://httptoolkit.com/
+
+## Applying an updated patch
+
+Run `node . patch` again to replace an older patch with the current one. You do
+not need to restore the app first. The patcher reads `patch.js` from its own
+folder, even when you launch it from another working directory.
+
+Before patching, you must confirm whether HTTP Toolkit can be closed. The default
+answer is **No**. No or Ctrl+C cancels the patch before closing processes or changing
+app files. Save any captured traffic you need before answering Yes.
+
+On Windows, Yes closes HTTP Toolkit windows, waits up to three seconds, and then
+stops any remaining HTTP Toolkit app and server processes. It checks again before
+changing files. If a process cannot be stopped, patching stops too. Administrator
+PowerShell may be needed for an app installed under `Program Files`.
+
+The patch also keeps pricing requests on the real API and turns off analytics
+capture before the SDK starts. Cached UI files receive the analytics setting too.
+The MCP origin edit no longer depends on a particular minified variable name.
+Other minified code changes can still require a patcher update.
+
+## Tests
+
+Run `npm test` with Node.js 18 or newer. The tests do not need an installed copy of
+HTTP Toolkit and do not close real processes. They cover pricing routing,
+analytics settings, old patch removal, MCP origin matching, shutdown waiting and
+failure, and the confirmation prompt. They do not replace a full app startup test.

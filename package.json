@@ -5,7 +5,8 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node . patch"
+    "start": "node . patch",
+    "test": "node --test test-*.mjs"
   },
   "author": "ayyo42069",
   "license": "MIT",
