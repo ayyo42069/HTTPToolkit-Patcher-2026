@@ -57,16 +57,91 @@ console.log(`[Patcher] Temp path: ${__patcherTempPath}`);
 const __patcherApp = __patcherExpress();
 __patcherApp.disable('x-powered-by');
 
+// Fixed USD pricing snapshot retrieved on 2026-10-10. This is not a live price quote.
+const __patcherPricingResponse = {
+  "success": true,
+  "response": {
+    "products": [
+      {
+        "sku": "pro-monthly",
+        "product_id": 550380,
+        "product_title": "HTTP Toolkit Pro (monthly)",
+        "currency": "USD",
+        "price": {
+          "net": 4
+        },
+        "subscription": {
+          "interval": "month"
+        }
+      },
+      {
+        "sku": "pro-annual",
+        "product_id": 550382,
+        "product_title": "HTTP Toolkit Pro (annual)",
+        "currency": "USD",
+        "price": {
+          "net": 30
+        },
+        "subscription": {
+          "interval": "year"
+        }
+      },
+      {
+        "sku": "team-monthly",
+        "product_id": 550789,
+        "product_title": "HTTP Toolkit Team (monthly)",
+        "currency": "USD",
+        "price": {
+          "net": 6
+        },
+        "subscription": {
+          "interval": "month"
+        }
+      },
+      {
+        "sku": "team-annual",
+        "product_id": 550788,
+        "product_title": "HTTP Toolkit Team (annual)",
+        "currency": "USD",
+        "price": {
+          "net": 48
+        },
+        "subscription": {
+          "interval": "year"
+        }
+      }
+    ]
+  }
+};
+
 // LAYER 2: Intercept account API calls directly
 // Handles any endpoint the account store calls, so even if JS regex fails, app still gets pro user
 __patcherApp.all(/^\/__patcher_api\/(.*)/, (req, res) => {
   console.log(`[Patcher] API intercept: ${req.url}`);
+  const pathname = new URL(req.url, process.env.APP_URL).pathname;
+  if (pathname.endsWith("/get-prices")) {
+    return res.json(__patcherPricingResponse);
+  }
   const user = JSON.parse(JSON.stringify(__patcherProUser));
   user.subscription.expiry = new Date(user.subscription.expiry);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.json(user);
 });
+
+
+// Opt out before PostHog initializes, rather than blocking requests and causing retries.
+function __patcherRepairTelemetry(data) {
+  return data.replaceAll('api_host:"https://events.httptoolkit.tech"',
+    'opt_out_capturing_by_default:!0,api_host:"https://events.httptoolkit.tech"');
+}
+function __patcherRepairCachedUI(filePath) {
+  if (!filePath.endsWith('main.js')) return;
+  const original = __patcherFs.readFileSync(filePath, 'utf8');
+  if (original.includes('opt_out_capturing_by_default:!0,api_host:')) return;
+  const repaired = __patcherRepairTelemetry(original);
+  if (repaired !== original) __patcherFs.writeFileSync(filePath, repaired);
+}
 
 // Catch all requests and proxy them through our server
 __patcherApp.all(/(.*)/, async (req, res) => {
@@ -92,6 +167,7 @@ __patcherApp.all(/(.*)/, async (req, res) => {
   // Offline mode - serve from cache if no internet
   if (!(await __patcherHasInternet())) {
     if (__patcherFs.existsSync(filePath)) {
+      __patcherRepairCachedUI(filePath);
       return res.sendFile(filePath);
     }
     return res.status(404).send('No internet and file not cached');
@@ -103,6 +179,7 @@ __patcherApp.all(/(.*)/, async (req, res) => {
       try {
         const remoteDate = await __patcherRequest('HEAD', `https://app.httptoolkit.tech${req.url}`).then(r => new Date(r.headers['last-modified']));
         if (remoteDate < new Date(__patcherFs.statSync(filePath).mtime)) {
+          __patcherRepairCachedUI(filePath);
           return res.sendFile(filePath);
         }
       } catch (e) { /* ignore, just redownload */ }
@@ -190,6 +267,7 @@ __patcherApp.all(/(.*)/, async (req, res) => {
       }
     }
 
+    if (filePath.endsWith("main.js")) data = __patcherRepairTelemetry(data.toString());
     __patcherFs.writeFileSync(filePath, data);
     res.sendFile(filePath);
   } catch (e) {
@@ -243,6 +321,8 @@ app.on('ready', () => {
     (details, callback) => {
       try {
         const url = new URL(details.url);
+        // Pricing uses its own response schema: keep the real API endpoint.
+        if (/price|pricing|plans/i.test(url.pathname)) return callback({});
         const redirectURL = `http://localhost:${__patcherPort}/__patcher_api${url.pathname}${url.search}`;
         console.log(`[Patcher] Redirecting API: ${details.url} -> ${redirectURL}`);
         callback({ redirectURL });
