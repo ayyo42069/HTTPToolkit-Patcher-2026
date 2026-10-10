@@ -57,10 +57,71 @@ console.log(`[Patcher] Temp path: ${__patcherTempPath}`);
 const __patcherApp = __patcherExpress();
 __patcherApp.disable('x-powered-by');
 
+// Fixed USD pricing snapshot retrieved on 2026-10-10. This is not a live price quote.
+const __patcherPricingResponse = {
+  "success": true,
+  "response": {
+    "products": [
+      {
+        "sku": "pro-monthly",
+        "product_id": 550380,
+        "product_title": "HTTP Toolkit Pro (monthly)",
+        "currency": "USD",
+        "price": {
+          "net": 4
+        },
+        "subscription": {
+          "interval": "month"
+        }
+      },
+      {
+        "sku": "pro-annual",
+        "product_id": 550382,
+        "product_title": "HTTP Toolkit Pro (annual)",
+        "currency": "USD",
+        "price": {
+          "net": 30
+        },
+        "subscription": {
+          "interval": "year"
+        }
+      },
+      {
+        "sku": "team-monthly",
+        "product_id": 550789,
+        "product_title": "HTTP Toolkit Team (monthly)",
+        "currency": "USD",
+        "price": {
+          "net": 6
+        },
+        "subscription": {
+          "interval": "month"
+        }
+      },
+      {
+        "sku": "team-annual",
+        "product_id": 550788,
+        "product_title": "HTTP Toolkit Team (annual)",
+        "currency": "USD",
+        "price": {
+          "net": 48
+        },
+        "subscription": {
+          "interval": "year"
+        }
+      }
+    ]
+  }
+};
+
 // LAYER 2: Intercept account API calls directly
 // Handles any endpoint the account store calls, so even if JS regex fails, app still gets pro user
 __patcherApp.all(/^\/__patcher_api\/(.*)/, (req, res) => {
   console.log(`[Patcher] API intercept: ${req.url}`);
+  const pathname = new URL(req.url, process.env.APP_URL).pathname;
+  if (pathname.endsWith("/get-prices")) {
+    return res.json(__patcherPricingResponse);
+  }
   const user = JSON.parse(JSON.stringify(__patcherProUser));
   user.subscription.expiry = new Date(user.subscription.expiry);
   res.setHeader('Access-Control-Allow-Origin', '*');

@@ -88,7 +88,8 @@ stops any remaining HTTP Toolkit app and server processes. It checks again befor
 changing files. If a process cannot be stopped, patching stops too. Administrator
 PowerShell may be needed for an app installed under `Program Files`.
 
-The patch also keeps pricing requests on the real API and turns off analytics
+The local pricing endpoint returns a fixed USD snapshot (2026-10-10), rather than
+a user object. Prices are not updated automatically. The patch turns off analytics
 capture before the SDK starts. Cached UI files receive the analytics setting too.
 The MCP origin edit no longer depends on a particular minified variable name.
 Other minified code changes can still require a patcher update.
