@@ -77,8 +77,7 @@ https://httptoolkit.com/
 ## Applying an updated patch
 
 Run `node . patch` again to replace an older patch with the current one. You do
-not need to restore the app first. The patcher reads `patch.js` from its own
-folder, even when you launch it from another working directory.
+not need to restore the app first. Run the command from the patcher folder.
 
 Before patching, you must confirm whether HTTP Toolkit can be closed. The default
 answer is **No**. No or Ctrl+C cancels the patch before closing processes or changing

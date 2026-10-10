@@ -223,7 +223,7 @@ const patchApp = async () => {
   }
 
   ;['SIGINT', 'SIGTERM'].forEach(signal => process.on(signal, cleanUp))
-  const patchContent = fs.readFileSync(new URL('./patch.js', import.meta.url), 'utf-8')
+  const patchContent = fs.readFileSync('patch.js', 'utf-8')
 
   // Some builds ship a CommonJS entry point, where the patch's top-level
   // `await import()` is a syntax error and the app won't even start
