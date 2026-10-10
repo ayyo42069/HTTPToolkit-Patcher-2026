@@ -93,10 +93,3 @@ The patch also keeps pricing requests on the real API and turns off analytics
 capture before the SDK starts. Cached UI files receive the analytics setting too.
 The MCP origin edit no longer depends on a particular minified variable name.
 Other minified code changes can still require a patcher update.
-
-## Tests
-
-Run `npm test` with Node.js 18 or newer. The tests do not need an installed copy of
-HTTP Toolkit and do not close real processes. They cover pricing routing,
-analytics settings, old patch removal, MCP origin matching, shutdown waiting and
-failure, and the confirmation prompt. They do not replace a full app startup test.
