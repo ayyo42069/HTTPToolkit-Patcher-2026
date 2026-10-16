@@ -148,6 +148,10 @@ __patcherApp.all(/(.*)/, async (req, res) => {
         console.log(`[Patcher] Brute-force method stubs injected`);
       }
 
+      // LAYER 1d: Opt out of PostHog analytics when it initialises. Only blocking its
+      // requests (see onBeforeSendHeaders) makes it retry them endlessly.
+      data = data.replaceAll('api_host:"https://events.httptoolkit.tech"', 'opt_out_capturing_by_default:!0,api_host:"https://events.httptoolkit.tech"');
+
       // LAYER 1c: Keep the MCP / remote-control bridge working. Because we fake a
       // logged-in Pro user without a real account JWT, the UI's `userJwt` getter
       // throws "No JWT found for logged in user", which crashes the operations
@@ -243,6 +247,9 @@ app.on('ready', () => {
     (details, callback) => {
       try {
         const url = new URL(details.url);
+        // Prices aren't a user object: answering with one makes the UI retry forever,
+        // so let the real API (which allows our origin) answer this one
+        if (url.pathname.endsWith('/get-prices')) return callback({});
         const redirectURL = `http://localhost:${__patcherPort}/__patcher_api${url.pathname}${url.search}`;
         console.log(`[Patcher] Redirecting API: ${details.url} -> ${redirectURL}`);
         callback({ redirectURL });

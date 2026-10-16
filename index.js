@@ -1,5 +1,6 @@
 // @ts-check
-import { spawn } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
+import { closeToolkitBeforePatch, isToolkitRunning } from './shutdown.js'
 import { flipFuses, FuseVersion, FuseV1Options } from '@electron/fuses'
 import asar from '@electron/asar'
 import prompts from 'prompts'
@@ -24,6 +25,10 @@ const argv = await yargs(process.argv.slice(2))
 
 const isWin = process.platform === 'win32'
 const isMac = process.platform === 'darwin'
+
+// Delimit the code we inject into the app's build/index.js
+const PATCH_START = '// ------- Injected by HTTP Toolkit Patcher -------'
+const PATCH_END = '// ------- End patched content -------'
 
 // Run npm through the same node binary that's running us. `sudo` resets PATH, so
 // with a user-local node (nvm etc.) the patcher starts fine but `npm` isn't found.
@@ -122,14 +127,44 @@ const cleanUp = async () => {
   process.exit(1)
 }
 
+// Strip what an earlier run injected, so re-patching replaces it rather than
+// stacking a second copy (its duplicate `const`s would crash the app)
+const stripPreviousPatch = source => {
+  const start = source.indexOf(PATCH_START)
+  if (start === -1) return source
+  const end = source.indexOf(PATCH_END, start)
+  if (end === -1) throw new Error("Couldn't find the end of the previous patch")
+  return source.slice(0, start) + source.slice(end + PATCH_END.length).replace(/^\r?\n/, '')
+}
+
 const patchApp = async () => {
   const filePath = path.join(appPath, 'app.asar')
   const tempPath = path.join(appPath, 'app')
 
-  if (fs.readFileSync(filePath).includes('Injected by HTTP Toolkit Patcher')) {
-    console.log(chalk.greenBright`App is already patched!`)
-    return
+  // Windows locks the files we rewrite while the app is running
+  if (isWin && isToolkitRunning()) {
+    const { close } = await prompts({
+      type: 'confirm',
+      name: 'close',
+      message: 'HTTP Toolkit is running and has to be closed to patch it. Close it now?',
+      initial: false
+    })
+    if (!close) {
+      console.log(chalk.yellowBright`Patch cancelled - close HTTP Toolkit and run the patcher again`)
+      isCancelled = true
+      return
+    }
+    try {
+      await closeToolkitBeforePatch(path.dirname(appPath))
+    } catch (e) {
+      console.error(chalk.redBright`${/** @type {Error} */ (e).message}`)
+      process.exit(1)
+    }
   }
+
+  // An already-patched app gets re-patched in place, so a patcher update only
+  // needs another `patch` run. Its .bak then still holds the original app.
+  const wasPatched = fs.readFileSync(filePath).includes(PATCH_START)
 
   const globalProxy = process.env.PROXY
 
@@ -197,8 +232,14 @@ const patchApp = async () => {
     console.error(chalk.redBright`Couldn't find index.js file`)
     cleanUp()
   }
-  const data = fs.readFileSync(indexPath, 'utf-8')
-    ;['SIGINT', 'SIGTERM'].forEach(signal => process.off(signal, cleanUp))
+  let data = fs.readFileSync(indexPath, 'utf-8')
+  try {
+    data = stripPreviousPatch(data)
+  } catch (e) {
+    console.error(chalk.redBright`${/** @type {Error} */ (e).message} - run {bold node . restore} first`)
+    return cleanUp()
+  }
+  ;['SIGINT', 'SIGTERM'].forEach(signal => process.off(signal, cleanUp))
 
   const { email } = await prompts({
     type: 'text',
@@ -233,7 +274,7 @@ const patchApp = async () => {
 
   // Inject the main patch code where APP_URL is defined
   const patchedData = data
-    .replace('const APP_URL =', `// ------- Injected by HTTP Toolkit Patcher -------\nconst email = \`${email.replace(/`/g, '\\`')}\`\nconst globalProxy = process.env.PROXY ?? \`${globalProxy ? globalProxy.replace(/`/g, '\\`') : ''}\`\n${patchCode}\n// ------- End patched content -------\nconst APP_URL =`)
+    .replace('const APP_URL =', `${PATCH_START}\nconst email = \`${email.replace(/`/g, '\\`')}\`\nconst globalProxy = process.env.PROXY ?? \`${globalProxy ? globalProxy.replace(/`/g, '\\`') : ''}\`\n${patchCode}\n${PATCH_END}\nconst APP_URL =`)
 
   if (data === patchedData || !patchedData) {
     console.error(chalk.redBright`Patch failed - couldn't find injection point`)
@@ -274,8 +315,16 @@ const patchApp = async () => {
   rm(path.join(tempPath, 'yarn.lock'))
   rm(path.join(tempPath, 'pnpm-lock.yaml'))
   rm(path.join(tempPath, 'bun.lockb'))
-  fs.copyFileSync(filePath, `${filePath}.bak`)
-  console.log(chalk.greenBright`Created backup at {bold ${filePath}.bak}`)
+  // When re-patching, app.asar is our own output: backing it up would replace the
+  // original and leave `restore` nothing to restore
+  if (!wasPatched) {
+    fs.copyFileSync(filePath, `${filePath}.bak`)
+    console.log(chalk.greenBright`Created backup at {bold ${filePath}.bak}`)
+  } else if (fs.existsSync(`${filePath}.bak`)) {
+    console.log(chalk.greenBright`Keeping the backup of the original app at {bold ${filePath}.bak}`)
+  } else {
+    console.error(chalk.yellowBright`No backup of the original app found, so {bold restore} won't work - reinstall HTTP Toolkit to undo the patch`)
+  }
 
   console.log(chalk.yellowBright`Repacking the app...`)
   await asar.createPackage(tempPath, filePath)
@@ -291,6 +340,7 @@ const patchApp = async () => {
 
   // Disable ASAR integrity checks so Electron doesn't complain
   await flipElectronFuses()
+  resignMacApp()
 }
 
 // Patch the bundled node server so the MCP / remote-control bridge accepts our
@@ -314,8 +364,9 @@ const patchServerBundle = () => {
   const edits = [
     {
       name: 'allow proxy origin',
-      from: 'ei?[/^https:\\/\\/app\\.httptoolkit\\.tech$/]:',
-      to: `ei?[/^https:\\/\\/app\\.httptoolkit\\.tech$/,/^http:\\/\\/localhost:${patcherPort}$/]:`
+      // The prod branch of `IS_PROD_BUILD ? [...] : [...]`, whatever the minifier names it
+      from: '?[/^https:\\/\\/app\\.httptoolkit\\.tech$/]:',
+      to: `?[/^https:\\/\\/app\\.httptoolkit\\.tech$/,/^http:\\/\\/localhost:${patcherPort}$/]:`
     },
     {
       name: 'accept bridge auth',
@@ -390,6 +441,28 @@ const flipElectronFuses = async () => {
   }
 }
 
+// Patching changes code inside the signed bundle (the fuses live in Electron
+// Framework), so macOS kills the app at launch: CODESIGNING, Invalid Page.
+// Re-sign the whole bundle ad-hoc. Not @electron/fuses' resetAdHocDarwinSignature:
+// it keeps the hardened runtime, whose library validation then refuses to load
+// the ad-hoc signed framework.
+const resignMacApp = () => {
+  if (!isMac) return
+  const appBundle = path.resolve(appPath, '..', '..')
+  console.log(chalk.yellowBright`Re-signing {bold ${appBundle}}...`)
+
+  // Best effort: quarantine makes Gatekeeper reject the new signature, and other
+  // extended attributes make codesign refuse to sign at all
+  spawnSync('xattr', ['-cr', appBundle])
+
+  const { status } = spawnSync('codesign', ['--force', '--deep', '--sign', '-', appBundle], { stdio: 'inherit' })
+  if (status === 0) {
+    console.log(chalk.greenBright`App re-signed successfully`)
+  } else {
+    console.error(chalk.redBright`Re-signing failed, so the app will crash on launch - run {bold codesign --force --deep --sign - "${appBundle}"}`)
+  }
+}
+
 switch (argv._[0]) {
   case 'patch':
     await patchApp()
@@ -404,6 +477,8 @@ switch (argv._[0]) {
         console.log(chalk.greenBright`App restored successfully`)
       }
       restoreServerBundle()
+      // The fuses stay flipped and the files just changed again
+      resignMacApp()
       rm(path.join(os.tmpdir(), 'httptoolkit-patch'))
     } catch (e) {
       if (!isSudo && /** @type {any} */ (e).errno === -13) { // Permission denied
