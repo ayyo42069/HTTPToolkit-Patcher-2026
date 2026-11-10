@@ -61,10 +61,28 @@ __patcherApp.disable('x-powered-by');
 // Handles any endpoint the account store calls, so even if JS regex fails, app still gets pro user
 __patcherApp.all(/^\/__patcher_api\/(.*)/, (req, res) => {
   console.log(`[Patcher] API intercept: ${req.url}`);
-  const user = JSON.parse(JSON.stringify(__patcherProUser));
-  user.subscription.expiry = new Date(user.subscription.expiry);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
+
+  // Neutralize get-prices to prevent infinite retry loop in loadPlanPricesUntilSuccess()
+  if (req.url.includes('get-prices')) {
+    return res.json({
+      success: true,
+      response: {
+        products: [
+          {
+            product_id: 'pro-annual',
+            currency: 'USD',
+            price: { net: 0 },
+            subscription: { interval: 'year' }
+          }
+        ]
+      }
+    });
+  }
+
+  const user = JSON.parse(JSON.stringify(__patcherProUser));
+  user.subscription.expiry = new Date(user.subscription.expiry);
   res.json(user);
 });
 
@@ -190,6 +208,19 @@ __patcherApp.all(/(.*)/, async (req, res) => {
         } else {
           data = userInit + patched;
           console.log(`[Patcher] main.js patched successfully (regex + brute-force)!`);
+        }
+      }
+    }
+
+    // LAYER 1d: Neutralize price lookup throw in vendor bundles if present
+    if (typeof data === 'string' || Buffer.isBuffer(data)) {
+      const dataStr = data.toString();
+      if (dataStr.includes('Price lookup request was unsuccessful')) {
+        const vendorTarget = 'if(!n.success)throw console.log(n),new Error("Price lookup request was unsuccessful")';
+        const vendorReplacement = 'if(!n.success){n.success=true;if(!n.response)n.response={products:[]};}';
+        if (dataStr.includes(vendorTarget)) {
+          data = dataStr.replace(vendorTarget, vendorReplacement);
+          console.log('[Patcher] Neutralised price lookup throw in vendor bundle');
         }
       }
     }

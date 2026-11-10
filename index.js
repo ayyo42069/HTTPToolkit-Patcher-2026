@@ -76,10 +76,51 @@ const exePath =
 
 const isSudo = !isWin && (process.getuid || (() => process.env.SUDO_UID ? 0 : null))() === 0
 
-// The bundled node server that backs MCP / remote control. It lives next to the
-// asar (not inside it), so we patch it directly on disk.
+// The bundled node server that backs MCP / remote control.
+// In HTTP Toolkit, the server may live directly next to the asar in the app folder,
+// or inside user-level client directories (e.g. %LOCALAPPDATA%\httptoolkit-server\client\<version>).
 const serverBundlePath = path.join(appPath, 'httptoolkit-server', 'bundle', 'index.js')
 const patcherPort = process.env.PATCHER_PORT || 5067
+
+const getServerBundlePaths = () => {
+  const paths = []
+  if (fs.existsSync(serverBundlePath)) paths.push(serverBundlePath)
+
+  // Auto-detect user-level client bundles (Windows redirector)
+  const localAppData = process.env.LOCALAPPDATA
+  if (localAppData) {
+    const clientDir = path.join(localAppData, 'httptoolkit-server', 'client')
+    if (fs.existsSync(clientDir)) {
+      try {
+        const versions = fs.readdirSync(clientDir)
+        for (const v of versions) {
+          const p = path.join(clientDir, v, 'bundle', 'index.js')
+          if (fs.existsSync(p) && !paths.includes(p)) paths.push(p)
+        }
+      } catch (e) {}
+    }
+  }
+
+  // Auto-detect user-level client bundles (Linux / macOS)
+  const homeDir = os.homedir()
+  const unixDirs = [
+    path.join(homeDir, '.local', 'share', 'httptoolkit-server', 'client'),
+    path.join(homeDir, 'Library', 'Application Support', 'httptoolkit-server', 'client')
+  ]
+  for (const clientDir of unixDirs) {
+    if (fs.existsSync(clientDir)) {
+      try {
+        const versions = fs.readdirSync(clientDir)
+        for (const v of versions) {
+          const p = path.join(clientDir, v, 'bundle', 'index.js')
+          if (fs.existsSync(p) && !paths.includes(p)) paths.push(p)
+        }
+      } catch (e) {}
+    }
+  }
+
+  return paths
+}
 
 if (+(process.versions.node.split('.')[0]) < 15) {
   console.error(chalk.redBright`Node.js version 15 or higher is recommended, you are using version {bold ${process.versions.node}}`)
@@ -356,7 +397,8 @@ const patchApp = async () => {
 // pattern no longer matches, we warn and skip rather than fail the whole patch —
 // the Pro unlock still works, only MCP remote control is affected.
 const patchServerBundle = () => {
-  if (!fs.existsSync(serverBundlePath)) {
+  const bundlePaths = getServerBundlePaths()
+  if (bundlePaths.length === 0) {
     console.log(chalk.yellowBright`Server bundle not found at ${serverBundlePath}, skipping MCP bridge patch`)
     return
   }
@@ -368,8 +410,15 @@ const patchServerBundle = () => {
       from: '?[/^https:\\/\\/app\\.httptoolkit\\.tech$/]:',
       to: `?[/^https:\\/\\/app\\.httptoolkit\\.tech$/,/^http:\\/\\/localhost:${patcherPort}$/]:`
     },
+    // Modern v1.27.4+ JWT auth bypass
     {
-      name: 'accept bridge auth',
+      name: 'accept bridge auth (v1.27.4+)',
+      from: 'e.user=void 0,A.sendAuthResult(e,{success:!1,error:"JWT validation failed: ".concat(t.message)}),e.ws.close(1007,"JWT validation failed: ".concat(t.message))',
+      to: 'e.user={isPaidUser:function(){return!0}},r&&A.completeInitialAuth(e),A.sendAuthResult(e,{success:!0})'
+    },
+    // Legacy JWT auth bypass
+    {
+      name: 'accept bridge auth (legacy)',
       from: 'if(!1===A.jwt){e.user=void 0,r&&this.completeInitialAuth(e)',
       to: 'if(!0){e.user=void 0,r&&this.completeInitialAuth(e)'
     },
@@ -377,47 +426,74 @@ const patchServerBundle = () => {
       name: 'force bridge isPaidUser',
       from: 'key:"isPaidUser",value:function(){',
       to: 'key:"isPaidUser",value:function(){return!0;'
+    },
+    // Suppress auto-updater trigger in server bundle to prevent crash loop
+    {
+      name: 'suppress trigger update',
+      from: 'onTriggerUpdate:function(){return g.emit("update-requested")}',
+      to: 'onTriggerUpdate:function(){return}'
+    },
+    {
+      name: 'suppress update-requested listener',
+      from: 's.on("update-requested",function(){c.runExclusive(function(){return H().run(["stable"])',
+      to: 's.on("update-requested",function(){return;c.runExclusive(function(){return H().run(["stable"])'
     }
   ]
 
-  let data = fs.readFileSync(serverBundlePath, 'utf-8')
+  for (const bPath of bundlePaths) {
+    let data = fs.readFileSync(bPath, 'utf-8')
 
-  if (edits.every(e => data.includes(e.to))) {
-    console.log(chalk.greenBright`Server bundle already patched for MCP`)
-    return
-  }
+    // Keep an original copy so `restore` can put it back.
+    const bundleBak = `${bPath}.bak`
+    if (!fs.existsSync(bundleBak)) fs.copyFileSync(bPath, bundleBak)
 
-  // Keep an original copy so `restore` can put it back.
-  const bundleBak = `${serverBundlePath}.bak`
-  if (!fs.existsSync(bundleBak)) fs.copyFileSync(serverBundlePath, bundleBak)
-
-  let applied = 0
-  for (const edit of edits) {
-    if (data.includes(edit.to)) { applied++; continue }
-    const count = data.split(edit.from).length - 1
-    if (count !== 1) {
-      console.error(chalk.yellowBright`Couldn't apply MCP patch '${edit.name}' (pattern changed?) - skipping`)
-      continue
+    let applied = 0
+    for (const edit of edits) {
+      if (data.includes(edit.to)) { applied++; continue }
+      if (!data.includes(edit.from)) continue
+      data = data.replace(edit.from, edit.to)
+      applied++
     }
-    data = data.replace(edit.from, edit.to)
-    applied++
-  }
 
-  if (applied === 0) {
-    console.error(chalk.yellowBright`No MCP bridge patches applied - remote control may be unavailable`)
-    return
-  }
+    fs.writeFileSync(bPath, data, 'utf-8')
+    console.log(chalk.greenBright`Patched server bundle for MCP at ${bPath} (${applied} edits active)`)
 
-  fs.writeFileSync(serverBundlePath, data, 'utf-8')
-  console.log(chalk.greenBright`Patched server bundle for MCP (${applied}/${edits.length} edits)`)
+    // Also check for and patch lib/index.js if next to bundle
+    const libIndexPath = path.resolve(path.dirname(bPath), '..', 'lib', 'index.js')
+    if (fs.existsSync(libIndexPath)) {
+      try {
+        let libData = fs.readFileSync(libIndexPath, 'utf-8')
+        const libTarget = "apiServer.on('update-requested', () => {\n        updateMutex.runExclusive(() => update_1.default.run(['stable'])"
+        const libRepl = "apiServer.on('update-requested', () => {\n        return;"
+        if (libData.includes(libTarget)) {
+          const libBak = `${libIndexPath}.bak`
+          if (!fs.existsSync(libBak)) fs.copyFileSync(libIndexPath, libBak)
+          libData = libData.replace(libTarget, libRepl)
+          fs.writeFileSync(libIndexPath, libData, 'utf-8')
+          console.log(chalk.greenBright`Patched lib/index.js update handler at ${libIndexPath}`)
+        }
+      } catch (e) {}
+    }
+  }
 }
 
 const restoreServerBundle = () => {
-  const bundleBak = `${serverBundlePath}.bak`
-  if (fs.existsSync(bundleBak)) {
-    fs.copyFileSync(bundleBak, serverBundlePath)
-    fs.rmSync(bundleBak, { force: true })
-    console.log(chalk.greenBright`Restored original server bundle`)
+  const bundlePaths = getServerBundlePaths()
+  for (const bPath of bundlePaths) {
+    const bundleBak = `${bPath}.bak`
+    if (fs.existsSync(bundleBak)) {
+      fs.copyFileSync(bundleBak, bPath)
+      fs.rmSync(bundleBak, { force: true })
+      console.log(chalk.greenBright`Restored original server bundle at ${bPath}`)
+    }
+
+    const libIndexPath = path.resolve(path.dirname(bPath), '..', 'lib', 'index.js')
+    const libBak = `${libIndexPath}.bak`
+    if (fs.existsSync(libBak)) {
+      fs.copyFileSync(libBak, libIndexPath)
+      fs.rmSync(libBak, { force: true })
+      console.log(chalk.greenBright`Restored original lib/index.js at ${libIndexPath}`)
+    }
   }
 }
 
