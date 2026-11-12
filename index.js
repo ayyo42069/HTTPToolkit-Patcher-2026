@@ -282,12 +282,13 @@ const patchApp = async () => {
   }
   ;['SIGINT', 'SIGTERM'].forEach(signal => process.off(signal, cleanUp))
 
-  const { email } = await prompts({
+  const email = argv.email || (await prompts({
     type: 'text',
     name: 'email',
     message: 'Enter an email for the pro plan',
+    initial: 'pro@developer.com',
     validate: value => value.includes('@') || 'Invalid email'
-  })
+  })).email || 'pro@developer.com'
 
   if (!email || typeof email !== 'string') {
     console.error(chalk.redBright`No email provided`)
@@ -313,9 +314,18 @@ const patchApp = async () => {
     .replace(/\(await import\((['"][^'"]+['"])\)\)\.default/g, 'require($1)')
     .replace(/\(await import\((['"][^'"]+['"])\)\)/g, 'require($1)')
 
-  // Inject the main patch code where APP_URL is defined
-  const patchedData = data
-    .replace('const APP_URL =', `${PATCH_START}\nconst email = \`${email.replace(/`/g, '\\`')}\`\nconst globalProxy = process.env.PROXY ?? \`${globalProxy ? globalProxy.replace(/`/g, '\\`') : ''}\`\n${patchCode}\n${PATCH_END}\nconst APP_URL =`)
+  // Inject the main patch code where APP_URL is defined (supports const, var, and let)
+  let patchedData = data
+  const appUrlMatch = patchedData.match(/(?:const|var|let)\s+APP_URL\s*=\s*(?:process\.env\.APP_URL\s*\|\|\s*)?["']https:\/\/app\.httptoolkit\.tech["']/) ||
+                      patchedData.match(/(?:const|var|let)\s+APP_URL\s*=/)
+
+  if (appUrlMatch) {
+    const target = appUrlMatch[0]
+    patchedData = patchedData.replace(
+      target,
+      `${PATCH_START}\nconst email = \`${email.replace(/`/g, '\\`')}\`\nconst globalProxy = process.env.PROXY ?? \`${globalProxy ? globalProxy.replace(/`/g, '\\`') : ''}\`\n${patchCode}\n${PATCH_END}\n${target}`
+    )
+  }
 
   if (data === patchedData || !patchedData) {
     console.error(chalk.redBright`Patch failed - couldn't find injection point`)
@@ -458,19 +468,18 @@ const patchServerBundle = () => {
     fs.writeFileSync(bPath, data, 'utf-8')
     console.log(chalk.greenBright`Patched server bundle for MCP at ${bPath} (${applied} edits active)`)
 
-    // Also check for and patch lib/index.js if next to bundle
+    // Also check for and patch lib/index.js if next to bundle cleanly without syntax errors
     const libIndexPath = path.resolve(path.dirname(bPath), '..', 'lib', 'index.js')
     if (fs.existsSync(libIndexPath)) {
       try {
         let libData = fs.readFileSync(libIndexPath, 'utf-8')
-        const libTarget = "apiServer.on('update-requested', () => {\n        updateMutex.runExclusive(() => update_1.default.run(['stable'])"
-        const libRepl = "apiServer.on('update-requested', () => {\n        return;"
-        if (libData.includes(libTarget)) {
+        const updateListenerRegex = /apiServer\.on\('update-requested',[\s\S]*?\}\);/
+        if (updateListenerRegex.test(libData)) {
           const libBak = `${libIndexPath}.bak`
           if (!fs.existsSync(libBak)) fs.copyFileSync(libIndexPath, libBak)
-          libData = libData.replace(libTarget, libRepl)
+          libData = libData.replace(updateListenerRegex, "apiServer.on('update-requested', () => {});")
           fs.writeFileSync(libIndexPath, libData, 'utf-8')
-          console.log(chalk.greenBright`Patched lib/index.js update handler at ${libIndexPath}`)
+          console.log(chalk.greenBright`Patched lib/index.js update handler cleanly at ${libIndexPath}`)
         }
       } catch (e) {}
     }

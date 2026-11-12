@@ -65,17 +65,16 @@ __patcherApp.all(/^\/__patcher_api\/(.*)/, (req, res) => {
   res.setHeader('Access-Control-Allow-Headers', '*');
 
   // Neutralize get-prices to prevent infinite retry loop in loadPlanPricesUntilSuccess()
+  // Must satisfy () => Object.values(t.SubscriptionPlans).some(e => !e.prices) across all 4 plans
   if (req.url.includes('get-prices')) {
     return res.json({
       success: true,
       response: {
         products: [
-          {
-            product_id: 'pro-annual',
-            currency: 'USD',
-            price: { net: 0 },
-            subscription: { interval: 'year' }
-          }
+          { product_id: 550380, currency: 'USD', price: { net: 0 }, subscription: { interval: 'month' } },
+          { product_id: 550382, currency: 'USD', price: { net: 0 }, subscription: { interval: 'year' } },
+          { product_id: 550789, currency: 'USD', price: { net: 0 }, subscription: { interval: 'month' } },
+          { product_id: 550788, currency: 'USD', price: { net: 0 }, subscription: { interval: 'year' } }
         ]
       }
     });
@@ -214,14 +213,17 @@ __patcherApp.all(/(.*)/, async (req, res) => {
 
     // LAYER 1d: Neutralize price lookup throw in vendor bundles if present
     if (typeof data === 'string' || Buffer.isBuffer(data)) {
-      const dataStr = data.toString();
-      if (dataStr.includes('Price lookup request was unsuccessful')) {
+      let dataStr = data.toString();
+      const fullTarget = 'async function i(){const e=await fetch(`${o.ACCOUNTS_API_BASE}/get-prices`);if(!e.ok)throw console.log(e),new Error(`Failed to look up prices, got ${e.status}: ${e.statusText}`);const n=await e.json();if(!n.success)throw console.log(n),new Error("Price lookup request was unsuccessful");return n.response.products.forEach(e=>{const n=Object.values(t.SubscriptionPlans).find(t=>t.paddleId===e.product_id);if(!n)return;const r=e.currency,o=e.price.net,i="year"===e.subscription.interval?o/12:o;n.prices={rawTotal:o,currency:r,total:a(r,o),monthly:a(r,i)}}),t.SubscriptionPlans}';
+      const fullRepl = 'async function i(){Object.values(t.SubscriptionPlans).forEach(n=>{n.prices={rawTotal:0,currency:"USD",total:"$0",monthly:"$0"}});return t.SubscriptionPlans}';
+      if (dataStr.includes(fullTarget)) {
+        data = dataStr.replace(fullTarget, fullRepl);
+        console.log('[Patcher] Replaced full price lookup with instant stub in vendor bundle');
+      } else if (dataStr.includes('Price lookup request was unsuccessful')) {
         const vendorTarget = 'if(!n.success)throw console.log(n),new Error("Price lookup request was unsuccessful")';
-        const vendorReplacement = 'if(!n.success){n.success=true;if(!n.response)n.response={products:[]};}';
-        if (dataStr.includes(vendorTarget)) {
-          data = dataStr.replace(vendorTarget, vendorReplacement);
-          console.log('[Patcher] Neutralised price lookup throw in vendor bundle');
-        }
+        const vendorReplacement = 'if(!n.success){n.success=true;if(!n.response)n.response={products:[{product_id:550380,currency:"USD",price:{net:0},subscription:{interval:"month"}},{product_id:550382,currency:"USD",price:{net:0},subscription:{interval:"year"}},{product_id:550789,currency:"USD",price:{net:0},subscription:{interval:"month"}},{product_id:550788,currency:"USD",price:{net:0},subscription:{interval:"year"}}]};}';
+        data = dataStr.replace(vendorTarget, vendorReplacement);
+        console.log('[Patcher] Neutralised price lookup throw in vendor bundle');
       }
     }
 
