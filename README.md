@@ -47,12 +47,15 @@ each platform; use `--path` to point at a non-default location.
 ## MCP / remote control
 
 The patch keeps HTTP Toolkit's MCP (and CLI remote-control) bridge working. To do
-this it also patches the bundled node server (`httptoolkit-server/bundle/index.js`,
-restored by `node . restore`) to:
+this it patches both the bundled node server (`httptoolkit-server/bundle/index.js`)
+and any user-level client bundles (`%LOCALAPPDATA%\httptoolkit-server\client\<version>\bundle\index.js`
+on Windows, or `~/.local/share` / `~/Library/Application Support` on Linux/macOS,
+all restored by `node . restore`) to:
 
 - allow the patched UI's local origin through the server's `ALLOWED_ORIGINS` list,
-- accept the bridge WebSocket auth (the faked Pro account has no real JWT), and
-- treat the session as Pro so Pro-only operations are available over MCP.
+- accept the bridge WebSocket auth (the faked Pro account has no real JWT),
+- treat the session as Pro so Pro-only operations are available over MCP, and
+- suppress background CLI auto-update triggers that can exit the server in offline/patched sessions.
 
 Security note: widening `ALLOWED_ORIGINS` relaxes a control that normally stops
 other local apps/sites from driving your proxy while the app is open. If you don't
@@ -60,7 +63,8 @@ need MCP, run `node . restore` to put the original server back.
 
 ## Notes
 
-- Creates a backup at `app.asar.bak` (and `httptoolkit-server/bundle/index.js.bak`) before patching
+- Tested and verified on HTTP Toolkit **v1.26.0** and **v1.27.4**
+- Creates a backup at `app.asar.bak` (and `*.bak` for patched server files) before patching
 - You can set a custom proxy with the `PROXY` environment variable
 - Use `--path` to point at a non-default install location; auto-detection covers `Program Files` and the newer `Programs\httptoolkit\HTTP Toolkit` layout on Windows, `/Applications/HTTP Toolkit.app` on macOS, and `/opt`, `/usr/lib`, `/usr/share` locations on Linux
 - Works offline after first run (caches UI files locally)
