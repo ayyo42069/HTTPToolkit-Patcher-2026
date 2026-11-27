@@ -7,6 +7,8 @@ const __patcherHttps = (await import('https')).default;
 const __patcherFs = (await import('fs')).default;
 const __patcherOs = (await import('os')).default;
 const __patcherPath = (await import('path')).default;
+const __patcherElectron = (await import('electron'));
+const __patcherElectronNet = __patcherElectron.net || __patcherElectron.default?.net;
 // --- End Patcher Imports ---
 
 // The fake pro user we inject everywhere
@@ -23,32 +25,99 @@ const __patcherProUser = {
   teamSubscription: null,
 };
 
-// Simple HTTP request helper with redirect support
-const __patcherRequest = (method, url, redirectCount = 0) => new Promise((resolve, reject) => {
-  const agent = globalProxy ? new __patcherHttpsProxyAgent(globalProxy.startsWith('http') ? globalProxy.replace(/^http:/, 'https:') : 'https://' + globalProxy) : undefined;
+const __patcherProxyUrl = (() => {
+  const raw = (globalProxy || process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '').trim();
+  if (!raw) return '';
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return `http://${raw}`;
+  return /^https?:\/\//i.test(raw) ? raw : '';
+})();
 
-  const req = __patcherHttps.request(url, { method, agent }, res => {
-    let data = Buffer.alloc(0);
-    res.on('data', chunk => data = Buffer.concat([data, chunk]));
+const __patcherProxyAgent = (() => {
+  if (!__patcherProxyUrl) return undefined;
+  try {
+    return new __patcherHttpsProxyAgent(__patcherProxyUrl);
+  } catch (e) {
+    console.error(`[Patcher] Ignoring invalid proxy URL "${__patcherProxyUrl}":`, e?.message || e);
+    return undefined;
+  }
+})();
+let __patcherOfflineUntil = 0;
+
+const __patcherRequestOnce = (method, url, extraOpts = {}, redirectCount = 0) => new Promise((resolve, reject) => {
+  const reqOpts = {
+    method,
+    ...(__patcherProxyAgent ? { agent: __patcherProxyAgent } : { autoSelectFamilyAttemptTimeout: 5000, ...extraOpts }),
+  };
+
+  const req = __patcherHttps.request(url, reqOpts, res => {
+    const chunks = [];
+    res.on('data', chunk => chunks.push(chunk));
+    res.on('error', reject);
+    res.on('close', () => {
+      if (!res.complete) reject(Object.assign(new Error(`Premature close (${method} ${url})`), { code: 'ECONNRESET' }));
+    });
     res.on('end', () => {
+      const data = Buffer.concat(chunks);
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         if (redirectCount >= 5) return reject(new Error('Too many redirects'));
-        return resolve(__patcherRequest(method, res.headers.location, redirectCount + 1));
+        let nextUrl;
+        try {
+          nextUrl = new URL(res.headers.location, url);
+        } catch (e) {
+          return reject(e);
+        }
+        if (nextUrl.protocol !== 'https:') return reject(new Error(`Unsupported redirect protocol: ${nextUrl.protocol}`));
+        return resolve(__patcherRequestOnce(method, nextUrl.toString(), extraOpts, redirectCount + 1));
       }
       resolve({ data, statusCode: res.statusCode, headers: res.headers });
     });
   });
+  req.setTimeout(15000, () => req.destroy(Object.assign(new Error(`Request timeout (${method} ${url})`), { code: 'ETIMEDOUT' })));
   req.on('error', reject);
   req.end();
 });
 
-// Quick check if we can reach the HTTP Toolkit servers
-const __patcherHasInternet = () => __patcherRequest('HEAD', 'https://app.httptoolkit.tech')
-  .then(r => r.statusCode >= 200 && r.statusCode < 400)
-  .catch(() => false);
+const __patcherIsTransientNetErr = err => {
+  const codes = new Set([err?.code, ...(Array.isArray(err?.errors) ? err.errors.map(e => e?.code) : [])]);
+  return ['ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH', 'ECONNRESET', 'ECONNABORTED', 'EHOSTUNREACH'].some(c => codes.has(c));
+};
+
+// Resilient HTTP request helper: retries transient DNS/IPv6 dual-stack timeouts
+// (e.g. Node's 250ms autoSelectFamily timeout on Linux), falls back to IPv4,
+// and finally falls back to Chromium's net.fetch when Electron is ready.
+const __patcherRequest = async (method, url) => {
+  const attempts = __patcherProxyAgent ? [{}, {}] : [{}, { family: 4 }, { family: 4 }];
+  let lastErr;
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      const result = await __patcherRequestOnce(method, url, attempts[i]);
+      __patcherOfflineUntil = 0;
+      return result;
+    } catch (err) {
+      lastErr = err;
+      if (!__patcherIsTransientNetErr(err)) break;
+      if (i < attempts.length - 1) await new Promise(r => setTimeout(r, 200 * (i + 1)));
+    }
+  }
+  if (!__patcherProxyAgent && typeof app !== 'undefined' && app.isReady() && __patcherElectronNet?.fetch) {
+    try {
+      const res = await __patcherElectronNet.fetch(url, { method, signal: AbortSignal.timeout(15000) });
+      const data = Buffer.from(await res.arrayBuffer());
+      __patcherOfflineUntil = 0;
+      return { data, statusCode: res.status, headers: Object.fromEntries(res.headers.entries()) };
+    } catch (netErr) {
+      lastErr = netErr;
+    }
+  }
+  __patcherOfflineUntil = Date.now() + 15000;
+  throw lastErr;
+};
 
 const __patcherPort = process.env.PATCHER_PORT || 5067;
-const __patcherTempPath = __patcherPath.join(__patcherOs.tmpdir(), 'httptoolkit-patch');
+const __patcherCacheUser = (() => {
+  try { return __patcherOs.userInfo().username; } catch (e) { return process.env.USER || process.env.USERNAME || 'default'; }
+})().replace(/[^a-zA-Z0-9._-]/g, '_');
+const __patcherTempPath = __patcherPath.join(__patcherOs.tmpdir(), `httptoolkit-patch-${__patcherCacheUser}`);
 
 // Point the app to our local server instead of the real one
 process.env.APP_URL = `http://localhost:${__patcherPort}`;
@@ -103,31 +172,56 @@ __patcherApp.all(/(.*)/, async (req, res) => {
   }
 
   if (!__patcherFs.existsSync(__patcherTempPath)) {
-    __patcherFs.mkdirSync(__patcherTempPath);
-  }
-
-  // Offline mode - serve from cache if no internet
-  if (!(await __patcherHasInternet())) {
-    if (__patcherFs.existsSync(filePath)) {
-      return res.sendFile(filePath);
-    }
-    return res.status(404).send('No internet and file not cached');
+    __patcherFs.mkdirSync(__patcherTempPath, { recursive: true });
   }
 
   try {
-    // Check if we have a cached copy that's still fresh
+    // If cached, check upstream mtime once; if offline/unreachable, serve cache cleanly.
     if (__patcherFs.existsSync(filePath)) {
+      if (Date.now() < __patcherOfflineUntil) {
+        return res.sendFile(filePath);
+      }
       try {
-        const remoteDate = await __patcherRequest('HEAD', `https://app.httptoolkit.tech${req.url}`).then(r => new Date(r.headers['last-modified']));
-        if (remoteDate < new Date(__patcherFs.statSync(filePath).mtime)) {
+        const head = await __patcherRequest('HEAD', `https://app.httptoolkit.tech${req.url}`);
+        if (head.statusCode < 200 || head.statusCode >= 300) {
           return res.sendFile(filePath);
         }
-      } catch (e) { /* ignore, just redownload */ }
+        const remoteDate = head.headers['last-modified'] ? new Date(head.headers['last-modified']) : null;
+        if (remoteDate && !Number.isNaN(remoteDate.getTime()) && remoteDate < new Date(__patcherFs.statSync(filePath).mtime)) {
+          return res.sendFile(filePath);
+        }
+      } catch (e) {
+        return res.sendFile(filePath);
+      }
     }
 
-    // Download from the real server
-    const remoteFile = await __patcherRequest('GET', `https://app.httptoolkit.tech${req.url}`);
-    for (const [key, value] of Object.entries(remoteFile.headers)) res.setHeader(key, value);
+    // Download directly from upstream (resilient request handles IPv4 fallback & retries)
+    let remoteFile;
+    try {
+      remoteFile = await __patcherRequest('GET', `https://app.httptoolkit.tech${req.url}`);
+    } catch (e) {
+      if (__patcherFs.existsSync(filePath)) {
+        return res.sendFile(filePath);
+      }
+      console.error(`[Patcher] Offline/fetch failed for ${req.url}:`, e?.message || e);
+      return res.status(404).send('No internet and file not cached');
+    }
+
+    if (remoteFile.statusCode < 200 || remoteFile.statusCode >= 300) {
+      if (__patcherFs.existsSync(filePath)) {
+        return res.sendFile(filePath);
+      }
+      for (const [key, value] of Object.entries(remoteFile.headers)) {
+        if (['transfer-encoding', 'connection', 'content-length', 'content-encoding', 'keep-alive', 'upgrade'].includes(key.toLowerCase())) continue;
+        res.setHeader(key, value);
+      }
+      return res.status(remoteFile.statusCode).send(remoteFile.data);
+    }
+
+    for (const [key, value] of Object.entries(remoteFile.headers)) {
+      if (['transfer-encoding', 'connection', 'content-length', 'content-encoding', 'keep-alive', 'upgrade'].includes(key.toLowerCase())) continue;
+      res.setHeader(key, value);
+    }
 
     // Create directories if needed
     const mkdirp = dir => {
