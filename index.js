@@ -101,12 +101,24 @@ const getServerBundlePaths = () => {
     }
   }
 
-  // Auto-detect user-level client bundles (Linux / macOS)
-  const homeDir = os.homedir()
-  const unixDirs = [
+  // Auto-detect user-level client bundles (Linux / macOS), including invoking user when run under sudo
+  const homeDirs = [os.homedir()]
+  if (!isWin && process.env.SUDO_USER && process.env.SUDO_USER !== 'root') {
+    let sudoHome = isMac
+      ? path.join('/Users', process.env.SUDO_USER)
+      : path.join('/home', process.env.SUDO_USER)
+    try {
+      const passwd = fs.readFileSync('/etc/passwd', 'utf-8')
+      const entry = passwd.split('\n').find(l => l.startsWith(`${process.env.SUDO_USER}:`))
+      const dir = entry?.split(':')[5]
+      if (dir) sudoHome = dir
+    } catch (e) {}
+    if (!homeDirs.includes(sudoHome) && fs.existsSync(sudoHome)) homeDirs.push(sudoHome)
+  }
+  const unixDirs = homeDirs.flatMap(homeDir => [
     path.join(homeDir, '.local', 'share', 'httptoolkit-server', 'client'),
     path.join(homeDir, 'Library', 'Application Support', 'httptoolkit-server', 'client')
-  ]
+  ])
   for (const clientDir of unixDirs) {
     if (fs.existsSync(clientDir)) {
       try {
@@ -134,10 +146,29 @@ if (!fs.existsSync(path.join(appPath, 'app.asar'))) {
 console.log(chalk.blueBright`Found HTTP Toolkit at {bold ${path.dirname(appPath)}}`)
 
 // Delete a file or directory tree, ignoring paths that don't exist
-const rm = dirPath => fs.rmSync(dirPath, { recursive: true, force: true })
+const rm = dirPath => fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+
+const getPatchCacheDirs = () => {
+  const dirs = new Set([path.resolve(os.tmpdir(), 'httptoolkit-patch')])
+  const sanitize = u => u.replace(/[^a-zA-Z0-9._-]/g, '_')
+  try {
+    const current = os.userInfo().username
+    if (current) dirs.add(path.resolve(os.tmpdir(), `httptoolkit-patch-${sanitize(current)}`))
+  } catch (e) {}
+  if (process.env.SUDO_USER) {
+    dirs.add(path.resolve(os.tmpdir(), `httptoolkit-patch-${sanitize(process.env.SUDO_USER)}`))
+  }
+  return [...dirs]
+}
+const clearPatchCache = () => {
+  for (const d of getPatchCacheDirs()) {
+    try { rm(d) } catch (e) {}
+  }
+}
 
 /** @type {Array<import('child_process').ChildProcess>} */
 const activeProcesses = []
+let activeDepsStage = ''
 let isCancelled = false
 
 const cleanUp = async () => {
@@ -152,18 +183,19 @@ const cleanUp = async () => {
     await new Promise(resolve => setTimeout(resolve, 1000))
   }
   const paths = [
-    path.resolve(os.tmpdir(), 'httptoolkit-patch'),
+    ...getPatchCacheDirs(),
+    ...(activeDepsStage ? [activeDepsStage] : []),
     path.resolve(appPath, 'app')
   ]
-  try {
-    for (const p of paths) {
+  for (const p of paths) {
+    try {
       if (fs.existsSync(p)) {
         console.log(chalk.yellowBright`Removing {bold ${p}}`)
         rm(p)
       }
+    } catch (e) {
+      console.error(chalk.redBright`Error while cleaning up ${p}`, e)
     }
-  } catch (e) {
-    console.error(chalk.redBright`Error while cleaning up`, e)
   }
   process.exit(1)
 }
@@ -337,10 +369,17 @@ const patchApp = async () => {
   console.log(chalk.yellowBright`Installing dependencies...`)
 
   const deps = ['express', 'https-proxy-agent']
+  const depsStage = fs.mkdtempSync(path.join(os.tmpdir(), 'httptoolkit-patcher-deps-'))
+  activeDepsStage = depsStage
   try {
+    // Install only patcher runtime deps in an isolated staging dir so npm doesn't
+    // pull down HTTP Toolkit's already-bundled dependencies (e.g. @sentry/*) or
+    // prune existing native addons (e.g. registry-js) inside app/node_modules.
+    fs.writeFileSync(path.join(depsStage, 'package.json'), JSON.stringify({ name: 'patcher-deps', private: true }))
+
     const proc = npmCli
-      ? spawn(process.execPath, [npmCli, 'install', ...deps], { cwd: tempPath, stdio: 'inherit' })
-      : spawn(`npm install ${deps.join(' ')}`, { cwd: tempPath, stdio: 'inherit', shell: true })
+      ? spawn(process.execPath, [npmCli, 'install', '--no-audit', '--no-fund', ...deps], { cwd: depsStage, stdio: 'inherit' })
+      : spawn(`npm install --no-audit --no-fund ${deps.join(' ')}`, { cwd: depsStage, stdio: 'inherit', shell: true })
     activeProcesses.push(proc)
     const code = await new Promise(resolve => {
       proc.on('error', () => resolve(null))
@@ -348,6 +387,30 @@ const patchApp = async () => {
     })
     activeProcesses.splice(activeProcesses.indexOf(proc), 1)
     if (isCancelled) return
+
+    const stagedModules = path.join(depsStage, 'node_modules')
+    const targetModules = path.join(tempPath, 'node_modules')
+    if (code === 0 && fs.existsSync(stagedModules)) {
+      fs.mkdirSync(targetModules, { recursive: true })
+      for (const entry of fs.readdirSync(stagedModules)) {
+        if (entry.startsWith('.')) continue
+        const srcEntry = path.join(stagedModules, entry)
+        const destEntry = path.join(targetModules, entry)
+        if (entry.startsWith('@') && fs.statSync(srcEntry).isDirectory()) {
+          fs.mkdirSync(destEntry, { recursive: true })
+          for (const scoped of fs.readdirSync(srcEntry)) {
+            const scopedDest = path.join(destEntry, scoped)
+            rm(scopedDest)
+            fs.cpSync(path.join(srcEntry, scoped), scopedDest, { recursive: true, force: true, dereference: true })
+          }
+        } else {
+          rm(destEntry)
+          fs.cpSync(srcEntry, destEntry, { recursive: true, force: true, dereference: true })
+        }
+      }
+    }
+    try { rm(depsStage) } catch (e) {}
+    activeDepsStage = ''
 
     // Repacking without these ships an app that dies on launch with
     // ERR_MODULE_NOT_FOUND, so stop here while app.asar is still untouched
@@ -358,8 +421,10 @@ const patchApp = async () => {
       return cleanUp()
     }
   } catch (e) {
+    try { rm(depsStage) } catch (_) {}
+    activeDepsStage = ''
     console.error(chalk.redBright`Error installing dependencies`, e)
-    cleanUp()
+    return cleanUp()
   }
 
   rm(path.join(tempPath, 'package-lock.json'))
@@ -387,7 +452,7 @@ const patchApp = async () => {
 
   // Drop any cached UI so main.js is re-fetched and re-patched (picks up the
   // MCP userJwt fix in patch.js on next launch).
-  rm(path.join(os.tmpdir(), 'httptoolkit-patch'))
+  clearPatchCache()
 
   // Disable ASAR integrity checks so Electron doesn't complain
   await flipElectronFuses()
@@ -564,7 +629,7 @@ switch (argv._[0]) {
       restoreServerBundle()
       // The fuses stay flipped and the files just changed again
       resignMacApp()
-      rm(path.join(os.tmpdir(), 'httptoolkit-patch'))
+      clearPatchCache()
     } catch (e) {
       if (!isSudo && /** @type {any} */ (e).errno === -13) { // Permission denied
         console.error(chalk.redBright`Permission denied${!isWin ? ', try running with sudo' : ', try running node as administrator'}`)
